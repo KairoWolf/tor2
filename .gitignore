@@ -2,3 +2,5 @@
 .tordata/
 received/
 __pycache__/
+
+*.egg-info/

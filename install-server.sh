@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install and start a self-hosted tor2 server as a systemd user service.
+# Install and start a self-hosted tor2 server as a systemd service.
 # Safe to re-run: it never overwrites an existing data directory.
 #
 # For lawful use only — see README.md.
@@ -48,7 +48,11 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 say "installing python dependencies"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet -r "$REPO_DIR/requirements.txt"
+# Editable install so `tor2-server` works from any directory, not just the
+# repo — `python -m tor2.server` silently depends on the working directory.
+"$VENV_DIR/bin/pip" install --quiet -e "$REPO_DIR"
+SERVER_BIN="$VENV_DIR/bin/tor2-server"
+[ -x "$SERVER_BIN" ] || SERVER_BIN="$VENV_DIR/bin/python -m tor2.server"
 
 # ---------- data directory ----------
 
@@ -81,7 +85,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$VENV_DIR/bin/python -m tor2.server $DATA_DIR --name $SERVER_NAME
+ExecStart=$SERVER_BIN $DATA_DIR --name $SERVER_NAME
 WorkingDirectory=$REPO_DIR
 Restart=on-failure
 RestartSec=10
@@ -165,7 +169,7 @@ if [ -n "${ADDR:-}" ]; then
   else
     echo
     echo "  Mint an invite with:"
-    echo "      $VENV_DIR/bin/python -m tor2.server $DATA_DIR --invite"
+    echo "      $SERVER_BIN $DATA_DIR --invite"
   fi
 elif [ -n "$SCOPE" ]; then
   echo "  Service installed and starting, but tor has not published the"
@@ -174,7 +178,7 @@ elif [ -n "$SCOPE" ]; then
 else
   echo "  Server installed, but no service manager was available."
   echo "  Start it manually to see the address and admin invite:"
-  echo "      $VENV_DIR/bin/python -m tor2.server $DATA_DIR --name $SERVER_NAME"
+  echo "      $SERVER_BIN $DATA_DIR --name $SERVER_NAME"
 fi
 echo
 if [ -n "$SCOPE" ]; then
@@ -183,7 +187,7 @@ if [ -n "$SCOPE" ]; then
   echo "  restart:  $SYSTEMCTL restart tor2-server"
   echo "  stop:     $SYSTEMCTL stop tor2-server"
 fi
-echo "  invite:   $VENV_DIR/bin/python -m tor2.server $DATA_DIR --invite"
+echo "  invite:   $SERVER_BIN $DATA_DIR --invite"
 echo
 echo "  Note: a server operator can read channel messages. Direct messages"
 echo "  between two people stay end-to-end encrypted. Lawful use only."

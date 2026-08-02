@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tor2"
+version = "0.3.0"
+description = "Encrypted chat over Tor onion services — direct messages and self-hosted servers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "stem",
+    "pynacl",
+    "textual",
+    "pillow",
+]
+
+[project.scripts]
+tor2 = "tor2.app:main"
+tor2-server = "tor2.serverd:main"
+
+[tool.setuptools]
+packages = ["tor2", "tor2.server"]
