@@ -1,7 +1,8 @@
 # tor2
 
 Encrypted two-person chat over Tor onion services, in your terminal.
-Text and images only — no file transfer, no remote commands, no computer access.
+Text, images, and videos only — no file transfer, no remote commands, no
+computer access.
 
 > ## ⚖️ Legal use only
 >
@@ -16,30 +17,34 @@ Text and images only — no file transfer, no remote commands, no computer acces
 > provide this software as-is, without warranty, and accept no responsibility
 > for misuse (see [LICENSE](LICENSE)).
 
-## What it does
+## Features
 
-- On startup, tor2 launches its own private Tor process and publishes an
-  **ephemeral v3 onion service** — it disappears when you quit, and nothing
-  about the session is persisted. Your address is shown at the top of the
-  screen.
-- You and your peer swap onion addresses over any channel, and one of you
-  runs `/connect <address>`. Reachability and NAT traversal are handled
-  entirely by Tor — no port forwarding, no server in the middle.
-- On top of Tor's own encryption, every session performs an ephemeral X25519
-  key exchange (NaCl `Box`), giving forward secrecy and a **session
-  fingerprint**. Read the fingerprint aloud to each other — if it matches on
-  both ends, nobody is in the middle.
+- **Serverless** — each side publishes an ephemeral v3 onion service; Tor
+  handles reachability and NAT traversal. No account, no middleman.
+- **5-digit pairing codes** — instead of dictating a 56-character onion
+  address, run `/code` and have your peer type `/join 48213`. The code
+  deterministically derives a temporary rendezvous onion address on both
+  ends, so even the pairing step needs no server.
+- **Accept gate** — nobody can start chatting with you just by knowing your
+  address or code. Every incoming session shows the peer's name and the
+  session fingerprint, and waits for your `/accept` or `/reject`.
+- **Contacts** — `/add mia` after a chat (or `/add mia <onion>`) and next
+  time it's just `/connect mia`. Stored in `~/.config/tor2/`.
+- **Images & videos** — images preview inline in the terminal; videos are
+  auto-compressed with ffmpeg (≤480p H.264) and sent chunked with progress.
+- **Triple encryption** — Tor's onion encryption, an ephemeral X25519
+  session layer with forward secrecy and a human-verifiable fingerprint, and
+  an inner tor2-only XSalsa20-Poly1305 layer that only this program can
+  produce or parse.
+- **Persistent nickname** — `/nick` is remembered across restarts.
 
 ## Requirements
 
-- Linux or macOS with **Tor installed**:
-  - Arch: `sudo pacman -S tor`
-  - Debian/Ubuntu: `sudo apt install tor`
-  - macOS: `brew install tor`
-
-  Tor does **not** need to be running as a service — tor2 starts and manages
+- Linux or macOS with **Tor installed** (`pacman -S tor` / `apt install tor`
+  / `brew install tor`). It does not need to run as a service — tor2 starts
   its own private instance.
-- **Python 3.11 or newer**
+- **ffmpeg** for video support (optional; everything else works without it).
+- **Python 3.11+**
 
 ## Install
 
@@ -52,63 +57,68 @@ python3 -m venv .venv
 
 ## Use
 
-Both people do the following:
+Both people run:
 
-1. **Start the app:**
+```sh
+.venv/bin/python -m tor2
+```
 
-   ```sh
-   .venv/bin/python -m tor2
-   ```
+Wait for Tor to bootstrap (~30–60 s on first run). Then either:
 
-2. **Wait for bootstrap.** The status bar shows Tor's progress; the first run
-   takes ~30–60 seconds. When it finishes, your own address appears:
+**Easiest — pairing code.** One person types `/code` and reads the 5-digit
+code to the other, who types `/join <code>`. Codes are valid for 15 minutes
+and retire after one use.
 
-   ```
-   your address: ptlox4ic....onion   |   not connected
-   ```
+**Or — onion address.** Your address is in the top bar; send it over any
+channel and your peer runs `/connect <address>`.
 
-3. **Swap addresses.** Send your `.onion` address to your peer over any
-   channel (it is public information — knowing it does not reveal your
-   identity or location).
+Either way, the receiving side sees:
 
-4. **One of you connects:**
+```
+• incoming chat request from “mia”
+• session fingerprint: d860-7390-ab18-4808
+• type /accept to start chatting, or /reject to refuse
+```
 
-   ```
-   /connect theirlongonionaddress.onion
-   ```
+After `/accept`, **verify the fingerprint** — both screens must show the
+same code. Then just type to chat.
 
-5. **Verify the fingerprint.** Both screens show the same short code like
-   `6559-6030-521e-3711`. Read it to each other — matching codes mean the
-   session is secure end-to-end.
+| command | effect |
+|---|---|
+| `/code` | publish a 5-digit pairing code (`/code off` cancels) |
+| `/join <code>` | connect using a peer's pairing code |
+| `/connect <contact-or-onion>` | connect directly |
+| `/accept` · `/reject` | answer an incoming chat request |
+| `/img <path>` | send an image (png/jpg/gif/webp/bmp, ≤5 MB) |
+| `/vid <path>` | send a video (auto-compressed, ≤10 min) |
+| `/add <name> [onion]` | save a contact (defaults to current peer) |
+| `/contacts` · `/delcontact <name>` | list / remove contacts |
+| `/nick <name>` | set your display name (persists) |
+| `/disconnect` | drop the session |
+| `ctrl+q` | quit — removes your onion service |
 
-6. **Chat.** Type to send text. Other commands:
-
-   | command | effect |
-   |---|---|
-   | `/img <path>` | send an image (png/jpg/gif/webp/bmp, ≤5 MB) |
-   | `/nick <name>` | set your display name |
-   | `/disconnect` | drop the session |
-   | `/help` | list commands |
-   | `ctrl+q` | quit (also removes your onion service) |
-
-Received images are validated, saved to `./received/`, and previewed inline
-in the terminal.
+Received images and videos are validated and saved to `./received/`.
 
 ## Safety properties
 
 - Onion addresses are self-authenticating: connecting to the right address
   cryptographically guarantees you reached the holder of that key.
-- Only three message types exist (`hello`, `txt`, `img`) — there is no file
-  transfer, no remote command, and no way for a peer to access your computer.
-  Unknown message types terminate the session.
-- Sender-supplied filenames are ignored; received images are re-validated
-  with PIL (decompression-bomb guard active) before being saved or rendered.
-- Frames are hard-capped at 16 MB, images at 5 MB, nicknames sanitized.
+- The accept gate means knowing an address or code only lets someone
+  *request* a chat; the fingerprint confirms *who* you accepted.
+- Only six message types exist (`hello`, `accept`, `txt`, `img`, `vmeta`,
+  `vchunk`) — there is no file-transfer or command surface. Unknown types
+  and frames missing the inner tor2 layer terminate the session.
+- Media is validated before it is kept: images must fully decode in PIL
+  (decompression-bomb guard active), videos must probe as real video via
+  ffprobe and match their announced size and SHA-256.
+- Frames capped at 16 MB, images 5 MB, videos 60 MB compressed, nicknames
+  and contact names sanitized. Sender-supplied filenames are never used.
 
 ## Limitations to understand
 
-- Anyone who learns your onion address can attempt to connect while the app
-  is running — the fingerprint check is what confirms *who* you're talking
-  to. Share addresses carefully and always verify the fingerprint.
+- A pairing code is guessable in principle (100,000 combinations) while it
+  is live — that only lets a guesser *request* a chat, which you can reject,
+  but prefer full addresses if you're being actively targeted.
+- Tor is slow; a 60 MB video can take many minutes to transfer.
 - This is a hobby project, not audited software. Do not rely on it in
   situations where your safety depends on it.

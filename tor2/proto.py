@@ -1,9 +1,16 @@
-"""Wire protocol: NaCl handshake, framing, and message encoding.
+"""Wire protocol: NaCl handshake, double encryption, framing, message encoding.
 
-Layered on top of the Tor onion connection (which is already encrypted and
-authenticates the *server* side via its onion address). This layer adds a
-session-ephemeral X25519 key exchange so both directions get forward secrecy
-and a mutual fingerprint the two humans can compare out loud.
+Three layers protect every message:
+
+1. Tor's own onion-service encryption (transport, authenticates the listener).
+2. An outer session layer: ephemeral X25519 key exchange (NaCl ``Box``) done
+   in :func:`handshake` — forward secrecy plus the human-verifiable
+   session fingerprint.
+3. An inner tor2-only layer: XSalsa20-Poly1305 (NaCl ``SecretBox``) under a
+   key derived from the handshake secret with a tor2-specific derivation
+   constant, wrapping a tor2 magic tag. Generic tooling that somehow held the
+   outer key still could not produce or parse tor2 frames without
+   implementing this layer.
 """
 
 import asyncio
@@ -11,14 +18,20 @@ import hashlib
 import json
 
 from nacl.public import Box, PrivateKey, PublicKey
+from nacl.secret import SecretBox
 
-MAGIC = b"TOR2\x01"
-MAX_FRAME = 16 * 1024 * 1024  # hard cap on a single encrypted frame
+MAGIC = b"TOR2\x02"          # handshake magic, protocol v2
+INNER_MAGIC = b"T2I1"        # tag inside the inner cipher layer
+INNER_PERSON = b"tor2-inner-v1"
+
+MAX_FRAME = 16 * 1024 * 1024
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_VIDEO_BYTES = 60 * 1024 * 1024
+VIDEO_CHUNK = 512 * 1024
 
-# Only these message types are ever acted on. There is deliberately no
-# file-transfer, command, or code-execution message.
-ALLOWED_TYPES = {"hello", "txt", "img"}
+# The complete message surface. There is deliberately no file-transfer,
+# command, or code-execution message.
+ALLOWED_TYPES = {"hello", "accept", "txt", "img", "vmeta", "vchunk"}
 
 
 class ProtocolError(Exception):
@@ -26,20 +39,22 @@ class ProtocolError(Exception):
 
 
 class Session:
-    """An established encrypted session over one duplex socket."""
+    """An established doubly-encrypted session over one duplex socket."""
 
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                 box: Box, fingerprint: str):
+                 box: Box, inner: SecretBox, fingerprint: str):
         self.reader = reader
         self.writer = writer
         self.box = box
+        self.inner = inner
         self.fingerprint = fingerprint
         self._send_lock = asyncio.Lock()
 
     async def send(self, obj: dict) -> None:
         plaintext = json.dumps(obj, separators=(",", ":")).encode()
-        ciphertext = self.box.encrypt(plaintext)  # random nonce prepended
-        frame = len(ciphertext).to_bytes(4, "big") + ciphertext
+        inner_ct = self.inner.encrypt(INNER_MAGIC + plaintext)
+        outer_ct = self.box.encrypt(inner_ct)  # each layer: random nonce prepended
+        frame = len(outer_ct).to_bytes(4, "big") + outer_ct
         async with self._send_lock:
             self.writer.write(frame)
             await self.writer.drain()
@@ -49,9 +64,12 @@ class Session:
         length = int.from_bytes(header, "big")
         if length == 0 or length > MAX_FRAME:
             raise ProtocolError(f"bad frame length {length}")
-        ciphertext = await self.reader.readexactly(length)
-        plaintext = self.box.decrypt(ciphertext)
-        obj = json.loads(plaintext.decode())
+        outer_ct = await self.reader.readexactly(length)
+        inner_ct = self.box.decrypt(outer_ct)
+        tagged = self.inner.decrypt(inner_ct)
+        if tagged[: len(INNER_MAGIC)] != INNER_MAGIC:
+            raise ProtocolError("inner layer tag mismatch — not a tor2 peer")
+        obj = json.loads(tagged[len(INNER_MAGIC):].decode())
         if not isinstance(obj, dict) or obj.get("t") not in ALLOWED_TYPES:
             raise ProtocolError("unknown message type")
         return obj
@@ -66,21 +84,24 @@ class Session:
 
 async def handshake(reader: asyncio.StreamReader,
                     writer: asyncio.StreamWriter) -> Session:
-    """Exchange magic + ephemeral public keys, derive the session box."""
+    """Exchange magic + ephemeral public keys, derive both cipher layers."""
     priv = PrivateKey.generate()
     writer.write(MAGIC + bytes(priv.public_key))
     await writer.drain()
 
     hello = await asyncio.wait_for(reader.readexactly(len(MAGIC) + 32), timeout=30)
     if hello[: len(MAGIC)] != MAGIC:
-        raise ProtocolError("peer is not speaking the tor2 protocol")
+        raise ProtocolError("peer is not speaking the tor2 protocol (or runs an old version)")
     peer_pub = PublicKey(hello[len(MAGIC):])
 
     box = Box(priv, peer_pub)
+    inner_key = hashlib.blake2b(
+        box.shared_key(), digest_size=32, person=INNER_PERSON).digest()
+    inner = SecretBox(inner_key)
+
     # Order-independent fingerprint of both session keys: both sides compute
-    # the same value and can read it to each other to rule out a MITM at the
-    # local Tor daemon.
+    # the same value and can read it to each other to rule out a MITM.
     keys = sorted([bytes(priv.public_key), bytes(peer_pub)])
     digest = hashlib.sha256(b"tor2-fp" + keys[0] + keys[1]).hexdigest()
     fingerprint = "-".join(digest[i:i + 4] for i in range(0, 16, 4))
-    return Session(reader, writer, box, fingerprint)
+    return Session(reader, writer, box, inner, fingerprint)
