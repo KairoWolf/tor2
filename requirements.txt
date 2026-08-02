@@ -1,0 +1,4 @@
+stem
+pynacl
+textual
+pillow
