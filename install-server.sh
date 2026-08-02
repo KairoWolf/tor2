@@ -41,7 +41,10 @@ command -v ffmpeg >/dev/null 2>&1 || warn \
 
 if [ ! -d "$VENV_DIR" ]; then
   say "creating virtualenv at $VENV_DIR"
-  "$PYTHON" -m venv "$VENV_DIR"
+  "$PYTHON" -m venv "$VENV_DIR" || die \
+    "could not create a virtualenv. On Debian/Ubuntu the venv module ships
+     separately:
+         apt install -y python3-venv"
 fi
 say "installing python dependencies"
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
@@ -59,18 +62,22 @@ fi
 mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 
-# ---------- systemd user service ----------
+# ---------- systemd service ----------
+#
+# Running as root (a dedicated server box or LXC container) gets a system
+# service; an unprivileged user gets a --user service. `systemctl --user`
+# frequently does not work in containers, which is why root prefers system
+# scope rather than falling back to it.
 
-SERVICE_OK=0
-if [ "${TOR2_NO_SYSTEMD:-0}" = "1" ]; then
-  warn "TOR2_NO_SYSTEMD=1 — skipping service installation"
-elif command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-  say "installing systemd user service"
-  mkdir -p "$UNIT_DIR"
-  cat > "$UNIT_FILE" <<UNIT
+SCOPE=""          # "system" | "user" | "" (none)
+SYSTEM_UNIT="/etc/systemd/system/tor2-server.service"
+
+write_unit() {  # $1 = target path, $2 = WantedBy target
+  cat > "$1" <<UNIT
 [Unit]
 Description=tor2 server (encrypted chat over Tor)
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -82,35 +89,65 @@ NoNewPrivileges=true
 PrivateTmp=true
 
 [Install]
-WantedBy=default.target
+WantedBy=$2
 UNIT
+}
 
-  # None of this is fatal: if systemd refuses, you can still run the daemon
-  # by hand, so fall through to the instructions at the end.
+if [ "${TOR2_NO_SYSTEMD:-0}" = "1" ]; then
+  warn "TOR2_NO_SYSTEMD=1 — skipping service installation"
+elif ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+  warn "systemd not available — skipping service installation"
+elif [ "$(id -u)" -eq 0 ]; then
+  say "installing system-wide systemd service"
+  write_unit "$SYSTEM_UNIT" "multi-user.target"
+  # Not fatal: if systemd refuses, the manual command is printed below.
+  if systemctl daemon-reload 2>/dev/null \
+     && systemctl enable tor2-server.service >/dev/null 2>&1 \
+     && systemctl restart tor2-server.service 2>/dev/null; then
+    SCOPE="system"
+  else
+    warn "system service could not be started — run the daemon manually (below)"
+  fi
+else
+  say "installing systemd user service"
+  mkdir -p "$UNIT_DIR"
+  write_unit "$UNIT_FILE" "default.target"
   if systemctl --user daemon-reload 2>/dev/null \
      && systemctl --user enable tor2-server.service >/dev/null 2>&1 \
      && systemctl --user restart tor2-server.service 2>/dev/null; then
-    SERVICE_OK=1
-    loginctl enable-linger "$USER" >/dev/null 2>&1 || warn \
+    SCOPE="user"
+    RUN_USER="${USER:-$(id -un)}"   # $USER is unset in containers and cron
+    loginctl enable-linger "$RUN_USER" >/dev/null 2>&1 || warn \
       "could not enable lingering — the server will stop when you log out
-     (run: sudo loginctl enable-linger $USER)"
-    say "waiting for tor to publish the onion service (up to 3 minutes)…"
-    for _ in $(seq 1 180); do
-      ADDR="$(journalctl --user -u tor2-server.service -n 300 --no-pager 2>/dev/null \
-              | grep -oE '[a-z2-7]{56}\.onion' | tail -1 || true)"
-      [ -n "${ADDR:-}" ] && break
-      sleep 1
-    done
-    INVITE="$(journalctl --user -u tor2-server.service -n 300 --no-pager 2>/dev/null \
-              | grep -oE 'ADMIN INVITE \(one use\): .*' | tail -1 | sed 's/.*: //' || true)"
+     (run: sudo loginctl enable-linger $RUN_USER)"
   else
     warn "systemd user service could not be started — run the daemon manually (below)"
   fi
-else
-  warn "systemd not available — skipping service installation"
 fi
-ADDR="${ADDR:-}"
-INVITE="${INVITE:-}"
+
+# ---------- wait for the onion address ----------
+
+JCTL="journalctl -u tor2-server.service"
+SYSTEMCTL="systemctl"
+if [ "$SCOPE" = "user" ]; then
+  JCTL="journalctl --user -u tor2-server.service"
+  SYSTEMCTL="systemctl --user"
+fi
+
+ADDR=""
+INVITE=""
+if [ -n "$SCOPE" ]; then
+  say "waiting for tor to publish the onion service (up to 4 minutes)…"
+  for _ in $(seq 1 240); do
+    ADDR="$($JCTL -n 400 --no-pager 2>/dev/null \
+            | grep -oE '[a-z2-7]{56}\.onion' | tail -1 || true)"
+    [ -n "$ADDR" ] && break
+    sleep 1
+  done
+  INVITE="$($JCTL -n 400 --no-pager 2>/dev/null \
+            | grep -oE 'ADMIN INVITE \(one use\): .*' | tail -1 | sed 's/.*: //' || true)"
+  [ -n "$ADDR" ] || warn "no address yet — it may still be bootstrapping; check the logs"
+fi
 
 # ---------- report ----------
 
@@ -130,15 +167,22 @@ if [ -n "${ADDR:-}" ]; then
     echo "  Mint an invite with:"
     echo "      $VENV_DIR/bin/python -m tor2.server $DATA_DIR --invite"
   fi
+elif [ -n "$SCOPE" ]; then
+  echo "  Service installed and starting, but tor has not published the"
+  echo "  address yet. Watch for it with:"
+  echo "      $JCTL -f"
 else
-  echo "  Server installed but no address captured yet."
+  echo "  Server installed, but no service manager was available."
   echo "  Start it manually to see the address and admin invite:"
   echo "      $VENV_DIR/bin/python -m tor2.server $DATA_DIR --name $SERVER_NAME"
 fi
 echo
-echo "  status:   systemctl --user status tor2-server"
-echo "  logs:     journalctl --user -u tor2-server -f"
-echo "  stop:     systemctl --user stop tor2-server"
+if [ -n "$SCOPE" ]; then
+  echo "  status:   $SYSTEMCTL status tor2-server"
+  echo "  logs:     $JCTL -f"
+  echo "  restart:  $SYSTEMCTL restart tor2-server"
+  echo "  stop:     $SYSTEMCTL stop tor2-server"
+fi
 echo "  invite:   $VENV_DIR/bin/python -m tor2.server $DATA_DIR --invite"
 echo
 echo "  Note: a server operator can read channel messages. Direct messages"
