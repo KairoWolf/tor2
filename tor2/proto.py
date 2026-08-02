@@ -20,7 +20,7 @@ import json
 from nacl.public import Box, PrivateKey, PublicKey
 from nacl.secret import SecretBox
 
-MAGIC = b"TOR2\x02"          # handshake magic, protocol v2
+MAGIC = b"TOR2\x03"          # handshake magic, protocol v3
 INNER_MAGIC = b"T2I1"        # tag inside the inner cipher layer
 INNER_PERSON = b"tor2-inner-v1"
 
@@ -29,9 +29,35 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_VIDEO_BYTES = 60 * 1024 * 1024
 VIDEO_CHUNK = 512 * 1024
 
+# Direct peer-to-peer chat.
+DM_TYPES = {"hello", "accept", "txt", "img", "vmeta", "vchunk"}
+
+# Server mode. Client → server:
+SERVER_C2S = {
+    "auth",       # invite code or saved token + nick
+    "post",       # text message to a channel
+    "switch",     # change active channel
+    "history",    # request recent messages for a channel
+    "mput",       # announce a media upload (kind, size, sha256, chunks)
+    "mchunk",     # a chunk of the announced upload
+    "fetch",      # request a stored media blob by id
+    "mkchan", "rmchan", "newinvite", "kick",   # admin only
+}
+# Server → client:
+SERVER_S2C = {
+    "srvhello",   # identifies this peer as a server, not a DM partner
+    "authok",     # token, channel list, is_admin
+    "event",      # a chat or media message in a channel
+    "histbatch",  # a batch of recent messages
+    "members",    # roster / presence update
+    "mget",       # media download header
+    "mgchunk",    # a chunk of a media download
+    "srverr",     # human-readable error
+}
+
 # The complete message surface. There is deliberately no file-transfer,
 # command, or code-execution message.
-ALLOWED_TYPES = {"hello", "accept", "txt", "img", "vmeta", "vchunk"}
+ALLOWED_TYPES = DM_TYPES | SERVER_C2S | SERVER_S2C
 
 
 class ProtocolError(Exception):

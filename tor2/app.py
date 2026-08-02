@@ -11,9 +11,11 @@ from pathlib import Path
 
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.containers import Horizontal
 from textual.widgets import Input, RichLog, Static
 
 from . import proto, store, video
+from .clientserver import SERVER, ServerModeMixin
 from .imgview import render_preview, validate_image
 from .tornet import TorNet, code_to_key, normalize_onion, onion_from_pub
 
@@ -24,11 +26,17 @@ RECEIVED_DIR = Path.cwd() / "received"
 IDLE, PENDING_IN, PENDING_OUT, CONNECTED = "idle", "pending_in", "pending_out", "connected"
 
 
+def fmt_size(n: int) -> str:
+    if n < 1024 * 1024:
+        return f"{max(1, n // 1024)} KB"
+    return f"{n / 1024 / 1024:.1f} MB"
+
+
 def clean_nick(raw: str) -> str:
     return re.sub(r"[^\w\- ]", "", str(raw))[:32].strip()
 
 
-class Tor2App(App):
+class Tor2App(ServerModeMixin, App):
     TITLE = "tor2"
 
     CSS = """
@@ -39,6 +47,12 @@ class Tor2App(App):
         background: $primary;
         color: $text;
         text-style: bold;
+    }
+    #sidebar {
+        width: 22;
+        padding: 0 1;
+        border-right: solid $primary-darken-1;
+        display: none;
     }
     #chat {
         border: round $primary-darken-1;
@@ -66,12 +80,15 @@ class Tor2App(App):
         self._incoming_video: dict | None = None  # in-progress receive
         self.pairing_code: str | None = None
         self._code_timer = None
+        self.srv: dict = {}
 
     # ---------- layout ----------
 
     def compose(self) -> ComposeResult:
         yield Static(" tor2 · starting…", id="status")
-        yield RichLog(id="chat", wrap=True, markup=False)
+        with Horizontal():
+            yield Static(id="sidebar")
+            yield RichLog(id="chat", wrap=True, markup=False)
         yield Input(placeholder="message…  (/help for commands)", id="inputbar")
 
     # ---------- helpers ----------
@@ -268,9 +285,14 @@ class Tor2App(App):
         if self.session is not None:
             await self.session.close()
             self.session = None
+        was_server = self.state == SERVER
         self.state = IDLE
         self.peer_nick = "peer"
         self._incoming_video = None
+        if was_server:
+            self.srv = {}
+            self.show_sidebar(False)
+            self.chat.clear()
         if self.tor.onion_addr:
             self.set_status("not connected")
 
@@ -293,6 +315,12 @@ class Tor2App(App):
 
     async def handle_message(self, msg: dict) -> None:
         kind = msg["t"]
+        if kind == "srvhello":
+            name = str(msg.get("name", "server"))[:40]
+            self.sys_msg(f"“{name}” is a tor2 server, not a person — join it with "
+                         "/joinserver <onion> <invite>", "yellow")
+            await self.drop_session()
+            return
         if kind == "accept":
             if self.state == PENDING_OUT:
                 self.peer_nick = clean_nick(msg.get("nick", "")) or "peer"
@@ -341,7 +369,7 @@ class Tor2App(App):
             return
         self._incoming_video = {"size": size, "chunks": chunks, "sha": sha,
                                 "parts": [], "got": 0}
-        self.sys_msg(f"{self.peer_nick} is sending a video ({size // 1024 // 1024} MB)…",
+        self.sys_msg(f"{self.peer_nick} is sending a video ({fmt_size(size)})…",
                      "magenta")
 
     async def handle_video_chunk(self, msg: dict) -> None:
@@ -373,13 +401,19 @@ class Tor2App(App):
             return
         dest = self._next_received("vid", "mp4")
         dest.write_bytes(blob)
-        try:
-            await asyncio.to_thread(video.validate_received, dest)
-        except Exception as e:
-            dest.unlink(missing_ok=True)
-            self.sys_msg(f"rejected video: {e}", "red")
+        if video.have_ffmpeg():
+            try:
+                await asyncio.to_thread(video.validate_received, dest)
+            except Exception as e:
+                dest.unlink(missing_ok=True)
+                self.sys_msg(f"rejected video: {e}", "red")
+                self.set_status(f"connected to “{self.peer_nick}” ✓")
+                return
         else:
-            self.sys_msg(f"{self.peer_nick} sent a video → {dest}", "magenta")
+            self.sys_msg("note: ffmpeg not installed, saved without verifying "
+                         "it decodes as video", "yellow")
+        self.sys_msg(f"{self.peer_nick} sent a video ({fmt_size(len(blob))}) → {dest}",
+                     "magenta")
         self.set_status(f"connected to “{self.peer_nick}” ✓")
 
     @staticmethod
@@ -470,7 +504,7 @@ class Tor2App(App):
             "t": "vmeta", "size": len(blob), "chunks": len(chunks),
             "sha256": hashlib.sha256(blob).hexdigest(),
         })
-        self.sys_msg(f"sending video: {len(blob) // 1024 // 1024} MB compressed "
+        self.sys_msg(f"sending video: {fmt_size(len(blob))} compressed "
                      f"(tor is slow — this can take a while)")
         for i, chunk in enumerate(chunks, 1):
             if self.state != CONNECTED:
@@ -491,12 +525,23 @@ class Tor2App(App):
             return
         if line.startswith("/"):
             await self.handle_command(line)
+        elif self.state == SERVER:
+            await self.server_post(line)
         else:
             await self.send_text(line)
 
     async def handle_command(self, line: str) -> None:
         cmd, _, arg = line.partition(" ")
         arg = arg.strip()
+
+        if cmd in ("/joinserver", "/server"):
+            coro = self.join_server(arg) if cmd == "/joinserver" else self.open_server(arg)
+            self.run_worker(coro, exclusive=False)
+            return
+        if self.state == SERVER:
+            if await self.handle_server_command(cmd, arg):
+                return
+
         match cmd:
             case "/connect":
                 self.run_worker(self.do_connect(arg), exclusive=False)
@@ -546,10 +591,62 @@ class Tor2App(App):
                     "/contacts · /delcontact <name>",
                     "/nick <name>                — set your display name (persists)",
                     "/disconnect · ctrl+q",
+                    "— servers —",
+                    "/joinserver <onion> <invite> [name] — join a tor2 server",
+                    "/server [name]              — reconnect a saved server (or list)",
                 ):
                     self.sys_msg(line_)
             case _:
                 self.sys_msg(f"unknown command: {cmd} (try /help)", "red")
+
+    async def handle_server_command(self, cmd: str, arg: str) -> bool:
+        """Commands that mean something different (or only exist) on a server.
+        Returns True if the command was handled here."""
+        match cmd:
+            case "/ch" | "/channel":
+                await self.server_switch(arg)
+            case "/channels":
+                self.sys_msg("channels: " +
+                             " ".join("#" + c for c in self.srv["channels"]))
+            case "/members":
+                self.sys_msg("online: " + (", ".join(self.srv["online"]) or "(nobody)"))
+            case "/img" | "/image":
+                self.run_worker(self.server_send_media(arg, "img"), exclusive=False)
+            case "/vid" | "/video":
+                self.run_worker(self.server_send_media(arg, "vid"), exclusive=False)
+            case "/get":
+                await self.server_fetch(arg)
+            case "/mkchan" | "/rmchan" | "/newinvite" | "/kick":
+                if not self.srv.get("admin"):
+                    self.sys_msg("admin only", "red")
+                else:
+                    await self.server_admin(cmd, arg)
+            case "/leave":
+                name = self.srv.get("local", "")
+                await self.drop_session()
+                if name and store.remove_server(name):
+                    self.sys_msg(f"left and forgot server “{name}”")
+            case "/help":
+                for line_ in (
+                    f"— server “{self.srv['name']}” —",
+                    "type to chat in the current channel",
+                    "/ch <name>         — switch channel      /channels · /members",
+                    "/img <path>        — post an image (shown inline to everyone)",
+                    "/vid <path>        — post a video (others download with /get)",
+                    "/get <id>          — download a posted video",
+                    "/disconnect        — go back to direct-message mode",
+                    "/leave             — disconnect and forget this server",
+                ):
+                    self.sys_msg(line_)
+                if self.srv.get("admin"):
+                    for line_ in (
+                        "admin: /mkchan <name> · /rmchan <name> · /kick <nick>",
+                        "admin: /newinvite [uses] [admin]  — mint an invite code",
+                    ):
+                        self.sys_msg(line_, "cyan")
+            case _:
+                return False
+        return True
 
     def cmd_add(self, arg: str) -> None:
         name, _, onion = arg.partition(" ")

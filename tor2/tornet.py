@@ -101,6 +101,29 @@ class TorNet:
         self.onion_addr = service.service_id + ".onion"
         return self.onion_addr
 
+    def publish_persistent_onion(self, local_port: int, key_file: Path) -> str:
+        """Blocking: publish an onion whose key is stored in ``key_file``.
+
+        The first call mints a key and saves it (0600); later calls republish
+        the same key, so a server keeps one stable address across restarts.
+        """
+        if key_file.is_file():
+            key_content = key_file.read_text().strip()
+            service = self.controller.create_ephemeral_hidden_service(
+                {80: f"127.0.0.1:{local_port}"},
+                key_type="ED25519-V3", key_content=key_content,
+                await_publication=True)
+        else:
+            service = self.controller.create_ephemeral_hidden_service(
+                {80: f"127.0.0.1:{local_port}"},
+                key_type="NEW", key_content="ED25519-V3",
+                await_publication=True)
+            key_file.parent.mkdir(parents=True, exist_ok=True)
+            key_file.write_text(service.private_key)
+            key_file.chmod(0o600)
+        self.onion_addr = service.service_id + ".onion"
+        return self.onion_addr
+
     def publish_code_onion(self, code: str, local_port: int) -> str:
         """Blocking: publish the rendezvous onion derived from a pairing code."""
         expanded, pub = code_to_key(code)

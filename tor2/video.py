@@ -14,12 +14,15 @@ def have_ffmpeg() -> bool:
 
 
 def probe(path: Path) -> dict:
-    """Return {'duration': float, 'codec': str}; raises if not a video."""
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=codec_name:format=duration",
-         "-of", "json", str(path)],
-        capture_output=True, text=True, timeout=30)
+    """Return {'duration': float, 'codec': str}; raises ValueError if not a video."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name:format=duration",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise ValueError("ffmpeg/ffprobe is not installed") from None
     if out.returncode != 0:
         raise ValueError("ffprobe could not read this file as video")
     info = json.loads(out.stdout)
@@ -32,15 +35,18 @@ def probe(path: Path) -> dict:
 
 def compress(src: Path, dest: Path) -> None:
     """Blocking: transcode to a small H.264/AAC mp4 (≤480p, crf 28)."""
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-i", str(src),
-         "-vf", "scale='min(854,iw)':-2",
-         "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
-         "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "96k",
-         "-movflags", "+faststart",
-         str(dest)],
-        capture_output=True, text=True, timeout=15 * 60)
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", str(src),
+             "-vf", "scale='min(854,iw)':-2",
+             "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
+             "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "96k",
+             "-movflags", "+faststart",
+             str(dest)],
+            capture_output=True, text=True, timeout=15 * 60)
+    except FileNotFoundError:
+        raise ValueError("ffmpeg is not installed") from None
     if result.returncode != 0:
         tail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "unknown error"
         raise ValueError(f"ffmpeg failed: {tail}")

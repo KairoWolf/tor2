@@ -1,6 +1,7 @@
 # tor2
 
-Encrypted two-person chat over Tor onion services, in your terminal.
+Encrypted chat over Tor onion services, in your terminal — private
+two-person conversations plus self-hosted servers with channels.
 Text, images, and videos only — no file transfer, no remote commands, no
 computer access.
 
@@ -36,6 +37,9 @@ computer access.
   session layer with forward secrecy and a human-verifiable fingerprint, and
   an inner tor2-only XSalsa20-Poly1305 layer that only this program can
   produce or parse.
+- **Self-hosted servers** — run a daemon on your own box and get
+  Discord-style channels, invite codes, roles, and searchable history, all
+  reachable only as an onion service. See [Self-hosting a server](#self-hosting-a-server).
 - **Persistent nickname** — `/nick` is remembered across restarts.
 
 ## Requirements
@@ -99,15 +103,95 @@ same code. Then just type to chat.
 
 Received images and videos are validated and saved to `./received/`.
 
+## Self-hosting a server
+
+A tor2 server is a small daemon you run on your own machine (a homelab box,
+a spare Pi, anything that stays on). It publishes one **stable** onion
+address and hosts Discord-style channels. There is no cloud service involved
+and no port forwarding to configure.
+
+### Install
+
+On the machine that will host it:
+
+```sh
+git clone https://github.com/KairoWolf/tor2.git
+cd tor2
+./install-server.sh my-server-name
+```
+
+The script checks dependencies, creates the virtualenv, initializes
+`~/.local/share/tor2-server/`, installs a **systemd user service** so the
+server survives reboots, and prints:
+
+```
+  address: ukmb36ciovvnnpp5….onion
+  admin invite (one use): kfpr-2xmq-nwte
+
+  In tor2, join it with:
+      /joinserver ukmb36ciovvnnpp5….onion kfpr-2xmq-nwte
+```
+
+Re-running the script is safe — it never overwrites an existing data
+directory, and the onion address stays the same across restarts.
+
+Managing it:
+
+```sh
+systemctl --user status tor2-server        # is it running?
+journalctl --user -u tor2-server -f        # live logs
+.venv/bin/python -m tor2.server ~/.local/share/tor2-server --invite   # new invite
+```
+
+### Joining and using a server
+
+```
+/joinserver <onion> <invite-code> [local-name]   # first time
+/server <local-name>                             # afterwards — no invite needed
+```
+
+Your membership token is saved, so rejoining is one command. Inside a
+server, a sidebar lists channels and who is online, and the input bar posts
+to the current channel:
+
+| command | effect |
+|---|---|
+| `/ch <name>` | switch channel |
+| `/channels` · `/members` | list channels / who's online |
+| `/img <path>` | post an image (shown inline to everyone) |
+| `/vid <path>` | post a video (auto-compressed; others download on demand) |
+| `/get <id>` | download a posted video |
+| `/disconnect` | return to direct-message mode |
+| `/leave` | disconnect and forget this server |
+
+Admins additionally get `/mkchan <name>`, `/rmchan <name>`, `/kick <nick>`,
+and `/newinvite [uses] [admin]` to mint invite codes.
+
+### What a server does and doesn't protect
+
+- Members reach the server only over Tor, through the same double-encrypted
+  session used for direct messages, and only with a valid invite.
+- **The server operator can read channel messages.** The daemon decrypts
+  them to route and store them — the same trust model as a self-hosted
+  Matrix or Mattermost. Run it yourself, and use direct messages (which stay
+  end-to-end encrypted between the two people) for anything you don't want
+  the host to see.
+- History is capped at 500 messages per channel and media at 2 GB total,
+  oldest evicted first. Kicking a member revokes their token immediately.
+
 ## Safety properties
 
 - Onion addresses are self-authenticating: connecting to the right address
   cryptographically guarantees you reached the holder of that key.
 - The accept gate means knowing an address or code only lets someone
   *request* a chat; the fingerprint confirms *who* you accepted.
-- Only six message types exist (`hello`, `accept`, `txt`, `img`, `vmeta`,
-  `vchunk`) — there is no file-transfer or command surface. Unknown types
-  and frames missing the inner tor2 layer terminate the session.
+- The message surface is a fixed, small set of chat and channel messages —
+  there is no file-transfer or command type, and nothing a peer or server
+  sends can run code or touch your machine outside `./received/`. Unknown
+  types and frames missing the inner tor2 layer terminate the session.
+- Server members must present a valid invite or a saved token before the
+  daemon will accept anything else from them; secrets are stored only as
+  hashes, so a stolen server database cannot be used to log in.
 - Media is validated before it is kept: images must fully decode in PIL
   (decompression-bomb guard active), videos must probe as real video via
   ffprobe and match their announced size and SHA-256.
