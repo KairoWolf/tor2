@@ -14,14 +14,16 @@ from stem.control import Controller
 ONION_RE = re.compile(r"^[a-z2-7]{56}(\.onion)?$")
 
 
-def code_to_key(code: str) -> tuple[bytes, bytes]:
-    """Derive a deterministic ed25519 keypair from a pairing code.
+def code_to_key(code: str, person: str = "tor2-rendezvous-v1") -> tuple[bytes, bytes]:
+    """Derive a deterministic ed25519 keypair from a short code.
 
-    Both peers compute the same key from the same code, so the code alone
-    determines a temporary onion address — no lookup server needed.
+    Both ends compute the same key from the same code, so the code alone
+    determines a temporary onion address — no lookup server, and nothing to
+    copy but the digits. `person` separates uses: a direct-chat pairing code
+    and a server join code with the same digits are different addresses.
     Returns (expanded_secret_64B_for_tor, public_key_32B).
     """
-    seed = hashlib.blake2b(f"tor2-rendezvous-v1:{code}".encode(),
+    seed = hashlib.blake2b(f"{person}:{code}".encode(),
                            digest_size=32).digest()
     h = bytearray(hashlib.sha512(seed).digest())
     h[0] &= 248
@@ -126,9 +128,10 @@ class TorNet:
         self.onion_addr = service.service_id + ".onion"
         return self.onion_addr
 
-    def publish_code_onion(self, code: str, local_port: int) -> str:
-        """Blocking: publish the rendezvous onion derived from a pairing code."""
-        expanded, pub = code_to_key(code)
+    def publish_code_onion(self, code: str, local_port: int,
+                           person: str = "tor2-rendezvous-v1") -> str:
+        """Blocking: publish the rendezvous onion derived from a code."""
+        expanded, pub = code_to_key(code, person)
         service = self.controller.create_ephemeral_hidden_service(
             {80: f"127.0.0.1:{local_port}"},
             key_type="ED25519-V3",
@@ -140,17 +143,29 @@ class TorNet:
         if actual != expected:  # sanity: our derivation must match tor's
             self.controller.remove_ephemeral_hidden_service(service.service_id)
             raise RuntimeError("rendezvous key derivation mismatch")
+        self.code_services = getattr(self, "code_services", {})
+        self.code_services[code] = service.service_id
         self.code_service_id = service.service_id
         return actual
 
-    def remove_code_onion(self) -> None:
-        sid = getattr(self, "code_service_id", None)
-        if sid and self.controller:
-            try:
-                self.controller.remove_ephemeral_hidden_service(sid)
-            except Exception:
-                pass
-        self.code_service_id = None
+    def remove_code_onion(self, code: str | None = None) -> None:
+        services = getattr(self, "code_services", {})
+        if code is not None:
+            sid = services.pop(code, None)
+            sids = [sid] if sid else []
+        else:
+            sids = list(services.values()) + (
+                [self.code_service_id] if getattr(self, "code_service_id", None)
+                else [])
+            services.clear()
+        for sid in sids:
+            if sid and self.controller:
+                try:
+                    self.controller.remove_ephemeral_hidden_service(sid)
+                except Exception:
+                    pass
+        if code is None:
+            self.code_service_id = None
 
     async def dial(self, onion: str, port: int = 80, stream: str = ""):
         """Connect to a peer's onion service through our SOCKS5 port.

@@ -29,6 +29,7 @@ log = logging.getLogger("tor2.server")
 
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "tor2-server"
 HISTORY_ON_JOIN = 50
+JOIN_CODE_PERSON = "tor2-server-join-v1"
 UPDATE_CHECK_INTERVAL = 24 * 60 * 60
 RATE_WINDOW = 10.0        # seconds
 RATE_MAX = 15             # messages per window per member
@@ -96,6 +97,8 @@ class Tor2Server:
         self.clients: set[Client] = set()
         self.uploads: dict[int, dict] = {}   # member id -> in-flight upload
         self.auth_failures: list[float] = []  # timestamps, for brute-force defence
+        self.published_codes: dict[str, str] = {}
+        self.local_port = 0
         self.name = self.db.get_meta("name") or "tor2-server"
         self.closing = False
         self.restart_requested = False
@@ -132,9 +135,38 @@ class Tor2Server:
         print("  for lawful use only — see README", flush=True)
         print("=" * 68 + "\n", flush=True)
 
+        self.local_port = port
+        await self.publish_join_codes()
         asyncio.create_task(self.update_loop())
         async with server:
             await server.serve_forever()
+
+    async def publish_join_codes(self) -> None:
+        """Give every live join code its own temporary address.
+
+        The digits derive the address, so someone holding the code can reach
+        the server without being told anything else.
+        """
+        for entry in self.db.active_join_codes():
+            await self.publish_one_code(entry["code"])
+
+    async def publish_one_code(self, code: str) -> str | None:
+        if code in self.published_codes:
+            return self.published_codes[code]
+        try:
+            addr = await asyncio.to_thread(
+                self.tor.publish_code_onion, code, self.local_port,
+                JOIN_CODE_PERSON)
+        except Exception as e:
+            log.warning("could not publish join code %s: %s", code, e)
+            return None
+        self.published_codes[code] = addr
+        log.info("join code %s is live", code)
+        return addr
+
+    async def unpublish_code(self, code: str) -> None:
+        if self.published_codes.pop(code, None):
+            await asyncio.to_thread(self.tor.remove_code_onion, code)
 
     def shutdown(self) -> None:
         self.closing = True
@@ -199,6 +231,7 @@ class Tor2Server:
             "mkchan": self.do_mkchan,
             "rmchan": self.do_rmchan,
             "newinvite": self.do_newinvite,
+            "joincode": self.do_joincode,
             "kick": self.do_kick,
             "ban": self.do_ban,
             "unban": self.do_unban,
@@ -212,6 +245,9 @@ class Tor2Server:
         await handler(c, msg)
 
     # ---------- auth ----------
+
+    def db_codes_left(self) -> set[str]:
+        return {e["code"] for e in self.db.active_join_codes()}
 
     def auth_locked(self) -> bool:
         """Refuse guessing sprees at invite codes and tokens."""
@@ -249,7 +285,15 @@ class Tor2Server:
                 c.enqueue({"t": "srverr",
                            "msg": f"the name “{nick}” is banned from this server"})
                 raise proto.ProtocolError("banned")
-            is_admin = self.db.redeem_invite(invite)
+            code = str(msg.get("code", "")).strip()
+            is_admin = None
+            if code:
+                is_admin = self.db.redeem_join_code(code)
+                if is_admin is not None and code not in self.db_codes_left():
+                    # spent: take its address down so the digits stop working
+                    asyncio.create_task(self.unpublish_code(code))
+            if is_admin is None and invite:
+                is_admin = self.db.redeem_invite(invite)
             if is_admin is None:
                 self.note_auth_failure()
                 c.enqueue({"t": "srverr", "msg": "invalid or used-up invite code"})
@@ -543,6 +587,49 @@ class Tor2Server:
         code = self.db.create_invite(uses=uses, is_admin=bool(msg.get("admin")))
         c.enqueue({"t": "srverr", "msg":
                    f"new invite: {code}  ({uses} use{'s' if uses > 1 else ''})"})
+
+    async def do_joincode(self, c: Client, msg: dict) -> None:
+        """Mint an 8-digit code that is address and invite in one."""
+        if not self._require_admin(c):
+            return
+        arg = str(msg.get("mode", "")).strip().lower()
+        if arg == "list":
+            live = self.db.active_join_codes()
+            if not live:
+                c.enqueue({"t": "srverr", "msg": "no join codes are live"})
+                return
+            listing = ", ".join(
+                f"{e['code']} ({e['uses_left']} use"
+                f"{'s' if e['uses_left'] != 1 else ''}"
+                f"{', admin' if e['is_admin'] else ''})" for e in live)
+            c.enqueue({"t": "srverr", "msg": f"live join codes: {listing}"})
+            return
+        if arg.startswith("revoke"):
+            code = arg.split()[-1]
+            ok = self.db.revoke_join_code(code)
+            if ok:
+                await self.unpublish_code(code)
+            c.enqueue({"t": "srverr",
+                       "msg": f"revoked {code}" if ok else f"no such code {code}"})
+            return
+
+        parts = arg.split()
+        uses = next((int(p) for p in parts if p.isdigit()), 1)
+        hours = 24
+        for p in parts:
+            if p.endswith("h") and p[:-1].isdigit():
+                hours = int(p[:-1])
+        code = self.db.create_join_code(uses=max(1, min(100, uses)),
+                                        is_admin="admin" in parts,
+                                        ttl_seconds=hours * 3600)
+        addr = await self.publish_one_code(code)
+        if addr is None:
+            self.db.revoke_join_code(code)
+            c.enqueue({"t": "srverr", "msg": "could not publish a join code"})
+            return
+        c.enqueue({"t": "srverr", "msg":
+                   f"join code: {code}  —  they type this alone, nothing else. "
+                   f"{uses} use(s), expires in {hours}h"})
 
     async def do_kick(self, c: Client, msg: dict) -> None:
         if not self._require_admin(c):

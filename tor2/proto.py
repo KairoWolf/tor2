@@ -52,7 +52,7 @@ DM_TYPES = {"hello", "accept", "txt", "img", "vmeta", "vchunk"}
 
 # Server mode. Client → server:
 SERVER_C2S = {
-    "auth",       # invite code or saved token + nick
+    "auth",       # join code, invite code, or saved token + nick
     "post",       # text message to a channel
     "switch",     # change active channel
     "history",    # request recent messages for a channel (before= pages back)
@@ -62,7 +62,7 @@ SERVER_C2S = {
     "fetch",      # request a stored media blob by id (thumb=1 for just a still)
     # admin only
     "mkchan", "rmchan", "newinvite", "kick",
-    "ban", "unban", "bans", "promote", "demote", "autoupdate",
+    "ban", "unban", "bans", "promote", "demote", "autoupdate", "joincode",
 }
 # Server → client:
 SERVER_S2C = {

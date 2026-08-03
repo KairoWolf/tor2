@@ -156,8 +156,23 @@ never changes.
 
 ### Invite people
 
-Invite codes are **single use**, so each person needs their own. As an admin
-inside tor2:
+**The easy way — an 8-digit join code.** As an admin inside tor2:
+
+```
+/joincode                one code, one use, valid a day
+/joincode 5 12h          five uses, valid 12 hours
+/joincode admin          the person who uses it becomes an admin
+/joincode list           what is live
+/joincode revoke 48213902
+```
+
+You give them **just the digits** — no address, no separate invite. They
+type `/join 48213902` and they are in. The code derives a temporary address
+that the server publishes for it, so nothing has to be looked up anywhere,
+and the address disappears once the code is spent.
+
+**The manual way.** Invite codes are single use, so each person needs their
+own:
 
 ```
 /newinvite            one code
@@ -239,7 +254,8 @@ repository completely.
 | command | what it does |
 |---|---|
 | **click a channel** or **↑ / ↓** | switch channels (typing still works) |
-| `/joinserver <address> <invite>` | join for the first time |
+| `/join <8-digit code>` | join with a code alone — no address needed |
+| `/joinserver <address> <invite>` | join with an address and invite instead |
 | `/server [name]` | reconnect a saved server, or list them |
 | `/ch <name>` · `/channels` · `/members` | switch / list channels, see who's on |
 | `/more` | load older messages |
@@ -270,7 +286,8 @@ bar.
 
 | command | what it does |
 |---|---|
-| `/newinvite [uses] [admin]` | mint an invite code |
+| `/joincode [uses] [admin] [12h]` | mint an 8-digit code that needs no address |
+| `/newinvite [uses] [admin]` | mint an invite code (needs the address too) |
 | `/mkchan <name>` · `/rmchan <name>` | create / delete a channel |
 | `/kick <nick>` | remove a member (they can rejoin with a new invite) |
 | `/ban <nick> [reason]` · `/unban <nick>` · `/bans` | block a name entirely |

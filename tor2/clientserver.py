@@ -16,8 +16,10 @@ from rich.text import Text
 from textual.widgets import Static
 
 from . import media, proto, settings, store, video
-from .imgview import render_preview, validate_image
-from .tornet import normalize_onion
+from .imgview import make_thumb, render_preview, validate_image
+from .tornet import code_to_key, normalize_onion, onion_from_pub
+
+JOIN_CODE_PERSON = "tor2-server-join-v1"
 
 # imported lazily from app to avoid a circular import at module load
 from .app_consts import RECEIVED_DIR, fmt_duration, fmt_size
@@ -71,6 +73,21 @@ class ServerModeMixin:
             return
         await self._connect_server(onion, invite=invite, local_name=local)
 
+    async def join_with_code(self, code: str) -> None:
+        """Join a server with an 8-digit code and nothing else.
+
+        The digits derive the address the server published for that code, so
+        there is no onion to copy and no separate invite to paste.
+        """
+        code = code.strip()
+        if not re.fullmatch(r"\d{8}", code):
+            self.sys_msg("usage: /join <8-digit code>", "red")
+            return
+        _, pub = code_to_key(code, JOIN_CODE_PERSON)
+        onion = onion_from_pub(pub)
+        self.sys_msg(f"looking for the server behind code {code}…")
+        await self._connect_server(onion, code=code)
+
     async def open_server(self, name: str) -> None:
         """/server <saved-name> — reconnect using the stored token."""
         servers = store.load_servers()
@@ -92,7 +109,8 @@ class ServerModeMixin:
                                    local_name=name)
 
     async def _connect_server(self, onion: str, invite: str = "", token: str = "",
-                              local_name: str = "", quiet: bool = False) -> None:
+                              local_name: str = "", quiet: bool = False,
+                              code: str = "") -> None:
         existing = self.convs.get(f"srv:{onion}")
         if existing is not None and existing.session is not None:
             self.sys_msg("already connected to that server", "red")
@@ -131,7 +149,8 @@ class ServerModeMixin:
                 "online": [], "buffers": {}, "download": None,
             }
             await session.send({"t": "auth", "nick": self.nick,
-                                "invite": invite, "token": token})
+                                "invite": invite, "token": token,
+                                "code": code})
         finally:
             current_conv.reset(tok)
         self.run_worker(self.server_loop(session, conv), group="net",
@@ -273,12 +292,15 @@ class ServerModeMixin:
         buf.clear()
         if msgs:
             self.srv.setdefault("oldest", {})[chan] = msgs[0].get("id")
+        self.srv["histthumbs"] = [m for m in msgs[-200:] if (m.get("media") or {}).get("thumb")]
         for m in msgs[-200:]:
             hit = (str(m.get("nick")) != self.nick
                    and self.mentions_me(str(m.get("body") or "")))
             buf.append(self.render_event(m, historic=True, mentioned=hit))
         if chan == self.srv["channel"]:
             self.redraw_channel()
+            for m in self.srv.get("histthumbs", [])[-4:]:
+                self.render_thumb(m.get("media"))
 
     def srv_event(self, msg: dict) -> None:
         chan = str(msg.get("chan", ""))
@@ -353,7 +375,7 @@ class ServerModeMixin:
     def render_thumb(self, info: dict | None) -> None:
         """Preview a video from the small thumbnail its sender attached, so
         members see what it is before spending minutes downloading it."""
-        if not info or info.get("kind") != "vid" or not info.get("thumb"):
+        if not info or not info.get("thumb") or info.get("kind") == "aud":
             return
         try:
             data = base64.b64decode(info["thumb"], validate=True)
@@ -574,6 +596,8 @@ class ServerModeMixin:
             self.sys_msg(f"no such file: {path}", "red")
             return
         thumb = None
+        if kind == "img":
+            pass          # thumbnail is made below, once the bytes are read
         if kind == "aud":
             prepared = await self.prepare_audio(path)
             if prepared is None:
@@ -591,6 +615,9 @@ class ServerModeMixin:
             except Exception as e:
                 self.sys_msg(f"not a supported image: {e}", "red")
                 return
+            # a small still travels with it, so people scrolling back see the
+            # picture without fetching the whole thing
+            thumb = make_thumb(blob)
             payload, tmpdir = path, None
         else:
             if not video.have_ffmpeg():
@@ -954,3 +981,5 @@ class ServerModeMixin:
             await self.session.send({"t": cmd.lstrip("/"), "nick": arg.strip()})
         elif cmd == "/autoupdate":
             await self.session.send({"t": "autoupdate", "mode": arg.strip()})
+        elif cmd == "/joincode":
+            await self.session.send({"t": "joincode", "mode": arg.strip()})

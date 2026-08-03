@@ -88,6 +88,12 @@ CREATE TABLE IF NOT EXISTS invites(
     uses_left INTEGER NOT NULL,
     is_admin INTEGER NOT NULL DEFAULT 0,
     created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS joincodes(
+    code TEXT PRIMARY KEY,
+    uses_left INTEGER NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    expires REAL NOT NULL,
+    created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS bans(
     nick TEXT PRIMARY KEY,
     reason TEXT,
@@ -167,6 +173,51 @@ class ServerDB:
                 (row["code_hash"],))
         self.db.commit()
         return bool(row["is_admin"])
+
+    # ---------- join codes ----------
+    #
+    # A join code is the whole invitation: the digits derive a temporary onion
+    # address *and* authorise the join, so there is nothing else to pass on.
+    # Kept in the clear, unlike invite hashes, because the server has to
+    # publish the address the code derives.
+
+    def create_join_code(self, uses: int = 1, is_admin: bool = False,
+                         ttl_seconds: float = 24 * 3600) -> str:
+        code = f"{secrets.randbelow(100_000_000):08d}"
+        self.db.execute(
+            "INSERT INTO joincodes(code,uses_left,is_admin,expires,created) "
+            "VALUES(?,?,?,?,?)",
+            (code, uses, int(is_admin), time.time() + ttl_seconds, time.time()))
+        self.db.commit()
+        return code
+
+    def active_join_codes(self) -> list[dict]:
+        self.db.execute("DELETE FROM joincodes WHERE expires < ?", (time.time(),))
+        self.db.commit()
+        return [{"code": r["code"], "uses_left": r["uses_left"],
+                 "is_admin": bool(r["is_admin"]), "expires": r["expires"]}
+                for r in self.db.execute(
+                    "SELECT * FROM joincodes ORDER BY created")]
+
+    def redeem_join_code(self, code: str) -> bool | None:
+        """Consume one use. Returns is_admin, or None if it is no good."""
+        row = self.db.execute(
+            "SELECT * FROM joincodes WHERE code=?", (code.strip(),)).fetchone()
+        if row is None or row["uses_left"] <= 0 or row["expires"] < time.time():
+            return None
+        if row["uses_left"] == 1:
+            self.db.execute("DELETE FROM joincodes WHERE code=?", (row["code"],))
+        else:
+            self.db.execute(
+                "UPDATE joincodes SET uses_left=uses_left-1 WHERE code=?",
+                (row["code"],))
+        self.db.commit()
+        return bool(row["is_admin"])
+
+    def revoke_join_code(self, code: str) -> bool:
+        cur = self.db.execute("DELETE FROM joincodes WHERE code=?", (code.strip(),))
+        self.db.commit()
+        return cur.rowcount > 0
 
     # ---------- members ----------
 

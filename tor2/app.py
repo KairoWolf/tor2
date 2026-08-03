@@ -758,8 +758,13 @@ class Tor2App(ServerModeMixin, App):
                      "you still /accept and verify the fingerprint")
 
     async def do_join(self, code: str) -> None:
+        code = code.strip()
+        if re.fullmatch(r"\d{8}", code):        # 8 digits means a server
+            await self.join_with_code(code)
+            return
         if not re.fullmatch(r"\d{5}", code):
-            self.sys_msg("usage: /join <5-digit code>", "red")
+            self.sys_msg("usage: /join <5-digit pairing code> or "
+                         "<8-digit server code>", "red")
             return
         _, pub = code_to_key(code)
         await self.do_connect(onion_from_pub(pub))
@@ -1179,6 +1184,7 @@ class Tor2App(ServerModeMixin, App):
         "/ch", "/channel", "/channels", "/members", "/more", "/del", "/delete",
         "/leave", "/get", "/mkchan", "/rmchan", "/kick", "/ban", "/unban",
         "/bans", "/promote", "/demote", "/newinvite", "/autoupdate", "/preview",
+        "/joincode",
     }
 
     ALL_COMMANDS = [
@@ -1189,7 +1195,7 @@ class Tor2App(ServerModeMixin, App):
         "/img", "/vid", "/big-vid", "/audio", "/get", "/save", "/play",
         "/preview",
         "/mkchan", "/rmchan", "/kick", "/ban", "/unban", "/bans",
-        "/promote", "/demote", "/newinvite", "/autoupdate",
+        "/promote", "/demote", "/newinvite", "/autoupdate", "/joincode",
     ]
 
     def completions(self, text: str) -> list[str]:
@@ -1322,7 +1328,8 @@ class Tor2App(ServerModeMixin, App):
             case "/help":
                 for line_ in (
                     "/code                       — get a 5-digit pairing code to share",
-                    "/join <code>                — connect using a peer's pairing code",
+                    "/join <code>                — 5 digits joins a person, "
+                    "8 digits joins a server",
                     "/connect <contact-or-onion> — connect to a peer",
                     "/accept · /reject           — answer an incoming chat request",
                     "/img <path>                 — send an image (≤5 MB)",
@@ -1422,6 +1429,8 @@ class Tor2App(ServerModeMixin, App):
                         "admin: /kick <nick> · /ban <nick> [reason] · /unban <nick> · /bans",
                         "admin: /promote <nick> · /demote <nick>  — grant or remove admin",
                         "admin: /newinvite [uses] [admin]  — mint an invite code",
+                        "admin: /joincode [uses] [admin] [12h] — one 8-digit code, "
+                        "no address needed  (also: list, revoke <code>)",
                         "admin: /autoupdate on|off|now     — auto-update from github",
                     ):
                         self.sys_msg(line_, "cyan")

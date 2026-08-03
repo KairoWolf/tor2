@@ -90,3 +90,23 @@ def render_frames(data: bytes, width: int = ANIM_WIDTH,
             frames.append(_to_text(frame, width, max_rows))
     # Terminals cannot keep up with 10ms frames, and some gifs claim 0.
     return frames, max(0.05, delay_ms / 1000)
+
+
+def make_thumb(data: bytes, width: int = 480, max_bytes: int = 120 * 1024
+               ) -> bytes | None:
+    """A small JPEG of a picture, so it can be previewed without downloading
+    the original."""
+    try:
+        with Image.open(io.BytesIO(data)) as src:
+            img = src.convert("RGB")
+            if img.width > width:
+                h = max(1, round(img.height * width / img.width))
+                img = img.resize((width, h), Image.LANCZOS)
+            for quality in (70, 55, 40):
+                out = io.BytesIO()
+                img.save(out, "JPEG", quality=quality)
+                if out.tell() <= max_bytes:
+                    return out.getvalue()
+    except Exception:
+        return None
+    return None
