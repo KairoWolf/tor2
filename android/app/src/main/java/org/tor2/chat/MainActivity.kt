@@ -28,7 +28,17 @@ class MainActivity : AppCompatActivity() {
     ) { uri: Uri? -> uri?.let { sendPicked(it, "vid") } }
 
     private val torConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {}
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            // The control connection is what lets the phone publish its own
+            // onion address, so other people can start a chat with it.
+            val binder = service as? TorService.LocalBinder ?: return
+            val torService = binder.service
+            vm.tor.socksPort = torService.socksPort.takeIf { it > 0 } ?: TorService.socksPort
+            runCatching { torService.torControlConnection }
+                .getOrNull()?.let { vm.tor.attachControl(it) }
+            vm.onTorServiceReady()
+        }
+
         override fun onServiceDisconnected(name: ComponentName?) {}
     }
 

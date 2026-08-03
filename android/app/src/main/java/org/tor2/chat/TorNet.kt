@@ -25,9 +25,10 @@ class TorNet(private val context: Context) {
 
     val status = MutableStateFlow("starting")
     val bootstrapPercent = MutableStateFlow(0)
+    val myOnion = MutableStateFlow<String?>(null)
     var socksPort: Int = 9050
-        private set
     private var control: TorControlConnection? = null
+    private var serviceId: String? = null
 
     /** Wait until Tor is bootstrapped and its SOCKS port is answering. */
     suspend fun awaitReady(timeoutMs: Long = 180_000) = withContext(Dispatchers.IO) {
@@ -57,19 +58,30 @@ class TorNet(private val context: Context) {
 
     /**
      * Publish an onion service pointing at a local port, so other people can
-     * start a chat with this phone. Returns the address.
+     * start a chat with this phone. Reuses a saved key so the address stays
+     * the same, which is what makes it worth sharing with a friend.
      */
     suspend fun publishOnion(localPort: Int, keyBlob: String?): Pair<String, String>? =
         withContext(Dispatchers.IO) {
             val conn = control ?: return@withContext null
-            val keyArg = keyBlob ?: "NEW:ED25519-V3"
+            val keyArg = keyBlob?.takeIf { it.isNotBlank() } ?: "NEW:ED25519-V3"
             val ports = HashMap<Int, String>()
             ports[80] = "127.0.0.1:$localPort"
-            val reply = conn.addOnion(keyArg, ports, null)
-            val id = reply?.get("ServiceID") ?: return@withContext null
+            val reply = runCatching { conn.addOnion(keyArg, ports, null) }
+                .getOrNull() ?: return@withContext null
+            val id = reply["ServiceID"] ?: return@withContext null
             val priv = reply["PrivateKey"] ?: keyBlob ?: ""
+            serviceId = id
+            myOnion.value = "$id.onion"
             Pair("$id.onion", priv)
         }
+
+    fun unpublishOnion() {
+        val id = serviceId ?: return
+        runCatching { control?.delOnion(id) }
+        serviceId = null
+        myOnion.value = null
+    }
 
     /**
      * Connect to an onion address. [stream] names an isolation group: distinct

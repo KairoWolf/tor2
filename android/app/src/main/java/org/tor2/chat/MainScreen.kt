@@ -40,6 +40,9 @@ fun MainScreen(vm: AppViewModel) {
     var showJoin by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showMembers by remember { mutableStateOf(false) }
+    var showStartChat by remember { mutableStateOf(false) }
+    val openChat by vm.openChat.collectAsState()
+    val incoming by vm.incomingRequest.collectAsState()
 
     Crossfade(targetState = ready, animationSpec = tween(500), label = "boot") { isReady ->
         if (!isReady) {
@@ -51,6 +54,7 @@ fun MainScreen(vm: AppViewModel) {
                     ServerDrawer(
                         vm = vm,
                         onJoin = { showJoin = true },
+                        onStartChat = { showStartChat = true },
                         onSettings = { showSettings = true },
                         onPicked = { scope.launch { drawer.close() } },
                     )
@@ -59,16 +63,35 @@ fun MainScreen(vm: AppViewModel) {
                 Scaffold { padding ->
                     Box(Modifier.padding(padding)) {
                         val c = client
-                        if (c == null) {
-                            NoServerYet(onJoin = { showJoin = true },
-                                        onOpenDrawer = { scope.launch { drawer.open() } })
-                        } else {
-                            ChatPane(
-                                vm = vm,
-                                client = c,
-                                onOpenChannels = { scope.launch { drawer.open() } },
-                                onOpenMembers = { showMembers = true },
-                            )
+                        val dm = openChat
+                        AnimatedContent(
+                            targetState = when {
+                                dm != null -> "dm"
+                                c != null -> "server"
+                                else -> "empty"
+                            },
+                            transitionSpec = {
+                                (fadeIn(tween(220)) + slideInHorizontally { it / 6 })
+                                    .togetherWith(fadeOut(tween(160)))
+                            },
+                            label = "pane",
+                        ) { which ->
+                            when (which) {
+                                "dm" -> dm?.let {
+                                    DirectPane(vm, it) { vm.openChat.value = null }
+                                }
+                                "server" -> c?.let {
+                                    ChatPane(
+                                        vm = vm, client = it,
+                                        onOpenChannels = { scope.launch { drawer.open() } },
+                                        onOpenMembers = { showMembers = true },
+                                    )
+                                }
+                                else -> NoServerYet(
+                                    onJoin = { showJoin = true },
+                                    onStartChat = { showStartChat = true },
+                                    onOpenDrawer = { scope.launch { drawer.open() } })
+                            }
                         }
                     }
                 }
@@ -77,6 +100,11 @@ fun MainScreen(vm: AppViewModel) {
     }
 
     if (showJoin) JoinSheet(vm) { showJoin = false }
+    if (showStartChat) StartChatSheet(vm) { showStartChat = false }
+    incoming?.let {
+        IncomingRequestDialog(it, onAccept = { vm.acceptIncoming() },
+                              onReject = { vm.rejectIncoming() })
+    }
     if (showSettings) SettingsSheet(vm) { showSettings = false }
     if (showMembers) client?.let { MembersSheet(it) { showMembers = false } }
     PreviewOverlay(client)
@@ -134,7 +162,8 @@ private fun BootScreen(vm: AppViewModel, banner: String?) {
 }
 
 @Composable
-private fun NoServerYet(onJoin: () -> Unit, onOpenDrawer: () -> Unit) {
+private fun NoServerYet(onJoin: () -> Unit, onStartChat: () -> Unit,
+                        onOpenDrawer: () -> Unit) {
     Column(
         Modifier.fillMaxSize().padding(30.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -155,6 +184,12 @@ private fun NoServerYet(onJoin: () -> Unit, onOpenDrawer: () -> Unit) {
             Spacer(Modifier.width(8.dp))
             Text("Join a server")
         }
+        Spacer(Modifier.height(6.dp))
+        OutlinedButton(onClick = onStartChat) {
+            Icon(Icons.Default.Chat, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Start a direct chat")
+        }
         TextButton(onClick = onOpenDrawer) { Text("Open menu") }
     }
 }
@@ -162,10 +197,13 @@ private fun NoServerYet(onJoin: () -> Unit, onOpenDrawer: () -> Unit) {
 /** Servers down the side, channels underneath the active one. */
 @Composable
 private fun ServerDrawer(vm: AppViewModel, onJoin: () -> Unit,
+                         onStartChat: () -> Unit,
                          onSettings: () -> Unit, onPicked: () -> Unit) {
     val servers by vm.savedServers.collectAsState()
     val client by vm.current.collectAsState()
     val nick by vm.nick.collectAsState()
+    val chats by vm.chats.collectAsState()
+    val openChat by vm.openChat.collectAsState()
 
     ModalDrawerSheet(Modifier.width(300.dp)) {
         Column(Modifier.fillMaxSize()) {
@@ -202,10 +240,24 @@ private fun ServerDrawer(vm: AppViewModel, onJoin: () -> Unit,
                 }
                 item {
                     TextButton(onClick = onJoin,
-                               modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                               modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
                         Icon(Icons.Default.Add, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text("Join a server")
+                    }
+                }
+                item { DrawerLabel("Direct chats") }
+                items(chats, key = { it.key }) { chat ->
+                    DirectChatRow(chat, openChat === chat) {
+                        vm.openDirect(chat); onPicked()
+                    }
+                }
+                item {
+                    TextButton(onClick = onStartChat,
+                               modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                        Icon(Icons.Default.Chat, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Start a direct chat")
                     }
                 }
             }

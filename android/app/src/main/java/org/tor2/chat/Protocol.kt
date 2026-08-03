@@ -30,6 +30,7 @@ object Protocol {
     const val VIDEO_CHUNK = 512 * 1024
     const val BIG_CHUNK = 2 * 1024 * 1024
     const val MAX_VIDEO = 60 * 1024 * 1024
+    const val MAX_IMAGE = 5 * 1024 * 1024
     const val KEEPALIVE_SECONDS = 25L
 
     fun chunkSizeFor(size: Long): Int = if (size > MAX_VIDEO) BIG_CHUNK else VIDEO_CHUNK

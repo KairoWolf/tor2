@@ -12,8 +12,8 @@ android {
         applicationId = "org.tor2.chat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildTypes {
@@ -62,6 +62,7 @@ dependencies {
     // desktop libsodium, so the wire-compatibility vectors can run on the JVM
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("com.goterl:lazysodium-java:5.1.4")
     testImplementation("net.java.dev.jna:jna:5.14.0")
 }

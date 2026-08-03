@@ -61,12 +61,36 @@ ANDROID_HOME=~/Android/Sdk ./gradlew assembleDebug
 # app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## What is not in the mobile app yet
+## Direct chats
 
-- Starting a **direct one-to-one chat** from the phone. Servers work fully;
-  DMs need the phone to publish its own onion service, which is written but
-  not yet wired to a screen.
-- Sending video and audio (receiving and previewing both work).
-- `/big-vid`-sized transfers and multi-circuit parallel downloads.
+Tap **Start a direct chat**. The app publishes the phone's own onion address
+(kept between runs, so a friend can save it) and listens behind it, so chats
+work in both directions: you can start one, and people can start one with you.
+
+Nobody can send you anything by knowing your address — an incoming chat shows
+who is asking plus the session fingerprint, and waits for you to accept. Tap
+the shield in a chat to see that fingerprint and compare it with the other
+person; matching codes mean nobody is in between.
+
+Direct chats never touch a server, so nobody but the two of you can read them.
+
+## Pictures, video and audio
+
+The **+** button in a direct chat, and the picture button in a channel, send
+media. Oversized pictures are shrunk to fit rather than rejected, and videos
+get a still attached so people can see what something is before downloading
+it over Tor.
+
+Videos are sent as they are — the phone does not re-encode them, so a large
+recording stays large. Trim or compress long videos before sending, or send
+them from the desktop client, which does re-encode.
+
+## What is not on mobile yet
+
+- Multi-circuit parallel transfers are implemented (`Parallel.kt`, tested) but
+  are not yet switched on for uploads from the phone.
+- Server administration: use the desktop client for `/ban`, `/promote`,
+  channels and invites.
+- Pairing codes (`/code` and `/join` on the desktop).
 
 Lawful use only — see the main README.
