@@ -109,12 +109,19 @@ class ServerModeMixin:
         }
         await session.send({"t": "auth", "nick": self.nick,
                             "invite": invite, "token": token})
-        self.run_worker(self.server_loop(session), exclusive=False)
+        self.run_worker(self.server_loop(session), group="net", exclusive=False)
 
     async def server_loop(self, session: proto.Session) -> None:
+        self.touch_rx()
+        self.run_worker(self.keepalive(session), group="net", exclusive=False)
         try:
             while True:
                 msg = await session.recv()
+                self.touch_rx()
+                if msg["t"] in ("ping", "pong"):
+                    if msg["t"] == "ping":
+                        await session.send({"t": "pong"})
+                    continue
                 await self.handle_server_msg(msg)
         except (asyncio.IncompleteReadError, ConnectionError):
             if self.session is session:
@@ -204,19 +211,18 @@ class ServerModeMixin:
         t.append(f"{ts} ", style="bright_black")
         t.append(f"{nick} ", style="bold cyan" if nick == self.nick else "bold magenta")
         t.append("▸ ", style="bright_black")
-        media = m.get("media")
-        if media:
-            size = media.get("size", 0)
-            if media.get("kind") == "img":
-                t.append(f"[image · {size // 1024} KB]", style="magenta")
-            else:
-                t.append(f"[video · {size / 1024 / 1024:.1f} MB] "
-                         f"download with /get {media.get('id')}", style="magenta")
+        info = m.get("media")
+        if info:
+            kind = "image" if info.get("kind") == "img" else "video"
+            t.append(f"[{kind} · {fmt_size(info.get('size', 0))}] ", style="magenta")
+            t.append(f"/get {info.get('id')}", style="bold cyan")
         else:
             t.append(str(m.get("body", "")))
         return t
 
     def render_inline_image(self, msg: dict, inline: str) -> None:
+        """Preview a pushed image. It is *not* written to disk — /get or
+        /save does that, so the channel doesn't litter your filesystem."""
         try:
             data = base64.b64decode(inline, validate=True)
             if len(data) > proto.MAX_IMAGE_BYTES:
@@ -225,13 +231,11 @@ class ServerModeMixin:
         except Exception as e:
             self.sys_msg(f"could not display image: {e}", "red")
             return
-        dest = self._next_received("img", fmt)
-        dest.write_bytes(data)
-        try:
-            self.chat.write(render_preview(data))
-        except Exception:
-            pass
-        self.sys_msg(f"saved → {dest.name}", "bright_black")
+        mid = (msg.get("media") or {}).get("id")
+        if mid is not None:
+            self.cache.put(str(mid), data, fmt)
+        self.show_preview(data, f"/save {mid} keeps it, /get {mid} downloads it"
+                          if mid is not None else "/save keeps it")
 
     # ---------- media download ----------
 
@@ -256,7 +260,7 @@ class ServerModeMixin:
         sink = media.ChunkSink(size, chunks, str(msg.get("sha256", ""))[:64],
                                ext=ext, tmp_dir=RECEIVED_DIR)
         self.srv["download"] = {"sink": sink, "kind": str(msg.get("kind", "vid")),
-                                "ext": ext}
+                                "ext": ext, "id": msg.get("id")}
         self.sys_msg(f"downloading {fmt_size(size)}…", "magenta")
 
     async def srv_mgchunk(self, msg: dict) -> None:
@@ -293,6 +297,13 @@ class ServerModeMixin:
                 self.update_server_status()
                 return
         self.sys_msg(f"downloaded → {dest}", "green")
+        if dl["kind"] == "img":       # show what just arrived
+            try:
+                data = dest.read_bytes()
+                self.cache.put(str(dl.get("id", dest.stem)), data, dl["ext"])
+                self.show_preview(data)
+            except Exception:
+                pass
         self.update_server_status()
 
     # ---------- outgoing ----------
@@ -406,7 +417,10 @@ class ServerModeMixin:
 
         listed = [w.channel for w in self.query(ChannelItem)]
         if listed != s["channels"]:
-            self.run_worker(self.rebuild_channel_items(), exclusive=True)
+            # Own group: an exclusive worker cancels others in its group, and
+            # the session loop must never be one of them.
+            self.run_worker(self.rebuild_channel_items(), group="sidebar",
+                            exclusive=True)
         else:
             self.mark_active_channel()
 
@@ -475,3 +489,24 @@ class ServerModeMixin:
                 self.sys_msg("usage: /kick <nick>", "red")
                 return
             await self.session.send({"t": "kick", "nick": arg.strip()})
+        elif cmd == "/ban":
+            nick, _, reason = arg.strip().partition(" ")
+            if not nick:
+                self.sys_msg("usage: /ban <nick> [reason]", "red")
+                return
+            await self.session.send({"t": "ban", "nick": nick,
+                                     "reason": reason.strip()})
+        elif cmd == "/unban":
+            if not arg.strip():
+                self.sys_msg("usage: /unban <nick>", "red")
+                return
+            await self.session.send({"t": "unban", "nick": arg.strip()})
+        elif cmd == "/bans":
+            await self.session.send({"t": "bans"})
+        elif cmd in ("/promote", "/demote"):
+            if not arg.strip():
+                self.sys_msg(f"usage: {cmd} <nick>", "red")
+                return
+            await self.session.send({"t": cmd.lstrip("/"), "nick": arg.strip()})
+        elif cmd == "/autoupdate":
+            await self.session.send({"t": "autoupdate", "mode": arg.strip()})

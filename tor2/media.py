@@ -128,3 +128,32 @@ async def send_file(session, path: Path, meta: dict, chunk_type: str,
 def plausible_chunk_count(size: int, chunks: int) -> bool:
     """Guard against a peer announcing an absurd number of tiny chunks."""
     return 0 < chunks <= size // 65536 + 2
+
+
+class MediaCache:
+    """Recently previewed images, so they can be replayed or saved without
+    re-downloading. Bounded in both count and bytes."""
+
+    def __init__(self, max_items: int = 12, max_bytes: int = 25 * 1024 * 1024):
+        self.max_items = max_items
+        self.max_bytes = max_bytes
+        self._items: dict[str, tuple[bytes, str]] = {}   # key -> (data, ext)
+
+    def put(self, key: str, data: bytes, ext: str) -> None:
+        if len(data) > self.max_bytes:
+            return
+        self._items.pop(key, None)
+        self._items[key] = (data, ext)
+        while (len(self._items) > self.max_items
+               or sum(len(d) for d, _ in self._items.values()) > self.max_bytes):
+            self._items.pop(next(iter(self._items)))
+
+    def get(self, key: str) -> tuple[bytes, str] | None:
+        return self._items.get(key)
+
+    @property
+    def last_key(self) -> str | None:
+        return next(reversed(self._items), None) if self._items else None
+
+    def clear(self) -> None:
+        self._items.clear()

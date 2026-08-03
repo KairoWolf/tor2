@@ -19,7 +19,7 @@ import signal
 import sys
 from pathlib import Path
 
-from . import media, proto
+from . import media, proto, updater
 from .serverdb import ServerDB
 from .tornet import TorNet
 
@@ -27,6 +27,7 @@ log = logging.getLogger("tor2.server")
 
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "tor2-server"
 HISTORY_ON_JOIN = 50
+UPDATE_CHECK_INTERVAL = 24 * 60 * 60
 
 
 def clean_nick(raw: str) -> str:
@@ -85,6 +86,8 @@ class Tor2Server:
         self.clients: set[Client] = set()
         self.name = self.db.get_meta("name") or "tor2-server"
         self.closing = False
+        self.restart_requested = False
+        self.main_task: asyncio.Task | None = None
 
     # ---------- lifecycle ----------
 
@@ -116,6 +119,7 @@ class Tor2Server:
         print("  for lawful use only — see README", flush=True)
         print("=" * 68 + "\n", flush=True)
 
+        asyncio.create_task(self.update_loop())
         async with server:
             await server.serve_forever()
 
@@ -161,6 +165,11 @@ class Tor2Server:
 
     async def dispatch(self, c: Client, msg: dict) -> None:
         kind = msg["t"]
+        if kind == "ping":
+            c.enqueue({"t": "pong"})
+            return
+        if kind == "pong":
+            return
         if not c.authed:
             if kind != "auth":
                 raise proto.ProtocolError("auth required")
@@ -177,6 +186,12 @@ class Tor2Server:
             "rmchan": self.do_rmchan,
             "newinvite": self.do_newinvite,
             "kick": self.do_kick,
+            "ban": self.do_ban,
+            "unban": self.do_unban,
+            "bans": self.do_bans,
+            "promote": self.do_promote,
+            "demote": self.do_demote,
+            "autoupdate": self.do_autoupdate,
         }.get(kind)
         if handler is None:
             return  # DM-only message type; ignore on a server
@@ -195,9 +210,16 @@ class Tor2Server:
                 c.enqueue({"t": "srverr", "msg":
                            "your membership is no longer valid — ask for a new invite"})
                 raise proto.ProtocolError("bad token")
+            if self.db.is_banned(row["nick"]):
+                c.enqueue({"t": "srverr", "msg": "you are banned from this server"})
+                raise proto.ProtocolError("banned")
             c.member_id, c.nick, c.is_admin = row["id"], row["nick"], bool(row["is_admin"])
             new_token = None
         else:
+            if self.db.is_banned(nick):
+                c.enqueue({"t": "srverr",
+                           "msg": f"the name “{nick}” is banned from this server"})
+                raise proto.ProtocolError("banned")
             is_admin = self.db.redeem_invite(invite)
             if is_admin is None:
                 c.enqueue({"t": "srverr", "msg": "invalid or used-up invite code"})
@@ -422,6 +444,165 @@ class Tor2Server:
         c.enqueue({"t": "srverr", "msg": f"kicked “{nick}”"})
         self.broadcast_members()
 
+    async def check_update(self, c: "Client | None" = None,
+                           force: bool = False) -> None:
+        """Fast-forward to the latest release and exit so the service manager
+        restarts us on the new code. Only ever called when an admin turned
+        auto-update on (or asked for it explicitly)."""
+        if not force and self.db.get_meta("autoupdate") != "1":
+            return
+        try:
+            info = await asyncio.to_thread(updater.check)
+        except updater.UpdateError as e:
+            if c:
+                c.enqueue({"t": "srverr", "msg": f"update check failed: {e}"})
+            log.info("update check failed: %s", e)
+            return
+        if not info["behind"]:
+            if c:
+                c.enqueue({"t": "srverr", "msg":
+                           f"already up to date ({info['current']})"})
+            return
+
+        log.info("updating: %d commit(s) behind %s", info["behind"], info["branch"])
+        if c:
+            c.enqueue({"t": "srverr", "msg":
+                       f"updating to {info['latest']} ({info['behind']} new "
+                       "commit(s)) — the server will restart"})
+        try:
+            await asyncio.to_thread(updater.apply)
+        except updater.UpdateError as e:
+            log.warning("update failed: %s", e)
+            if c:
+                c.enqueue({"t": "srverr", "msg": f"update failed: {e}"})
+            return
+        self.broadcast({"t": "srverr",
+                        "msg": "server is restarting to apply an update"})
+        await asyncio.sleep(1)
+        log.info("restarting to apply update")
+        self.restart_requested = True
+        if self.main_task is not None:   # stops serve_forever; main() then exits
+            self.main_task.cancel()
+
+    async def update_loop(self) -> None:
+        """Check daily while auto-update is enabled."""
+        while True:
+            await asyncio.sleep(UPDATE_CHECK_INTERVAL)
+            if self.db.get_meta("autoupdate") == "1":
+                try:
+                    await self.check_update()
+                except Exception as e:
+                    log.info("scheduled update check failed: %s", e)
+
+    def disconnect_member(self, member_id: int, why: str) -> None:
+        for cl in list(self.clients):
+            if cl.member_id == member_id:
+                cl.enqueue({"t": "srverr", "msg": why})
+                cl.member_id = None
+                self.clients.discard(cl)
+
+    async def do_ban(self, c: Client, msg: dict) -> None:
+        if not self._require_admin(c):
+            return
+        nick = clean_nick(msg.get("nick", ""))
+        reason = str(msg.get("reason", ""))[:200]
+        row = self.db.member_by_nick(nick)
+        if row and row["id"] == c.member_id:
+            c.enqueue({"t": "srverr", "msg": "you cannot ban yourself"})
+            return
+        if row and row["is_admin"]:
+            c.enqueue({"t": "srverr",
+                       "msg": f"“{nick}” is an admin — /demote them first"})
+            return
+        self.db.ban(nick, reason, c.nick)
+        if row:
+            self.disconnect_member(row["id"], "you were banned from this server")
+        c.enqueue({"t": "srverr", "msg": f"banned “{nick}”"
+                   + (f" ({reason})" if reason else "")})
+        log.info("%s banned %s", c.nick, nick)
+        self.broadcast_members()
+
+    async def do_unban(self, c: Client, msg: dict) -> None:
+        if not self._require_admin(c):
+            return
+        nick = clean_nick(msg.get("nick", ""))
+        ok = self.db.unban(nick)
+        c.enqueue({"t": "srverr", "msg": f"unbanned “{nick}” — they need a new "
+                   "invite to rejoin" if ok else f"“{nick}” is not banned"})
+
+    async def do_bans(self, c: Client, msg: dict) -> None:
+        if not self._require_admin(c):
+            return
+        rows = self.db.bans()
+        if not rows:
+            c.enqueue({"t": "srverr", "msg": "nobody is banned"})
+            return
+        listing = ", ".join(
+            b["nick"] + (f" ({b['reason']})" if b["reason"] else "") for b in rows)
+        c.enqueue({"t": "srverr", "msg": f"banned: {listing}"})
+
+    async def do_promote(self, c: Client, msg: dict) -> None:
+        if not self._require_admin(c):
+            return
+        nick = clean_nick(msg.get("nick", ""))
+        row = self.db.member_by_nick(nick)
+        if row is None:
+            c.enqueue({"t": "srverr", "msg": f"no member “{nick}” — they must "
+                       "join before you can promote them"})
+            return
+        if row["is_admin"]:
+            c.enqueue({"t": "srverr", "msg": f"“{row['nick']}” is already an admin"})
+            return
+        self.db.set_admin(row["id"], True)
+        for cl in self.clients:
+            if cl.member_id == row["id"]:
+                cl.is_admin = True
+                cl.enqueue({"t": "srverr",
+                            "msg": "you are now an admin of this server"})
+        c.enqueue({"t": "srverr", "msg": f"promoted “{row['nick']}” to admin"})
+        log.info("%s promoted %s to admin", c.nick, row["nick"])
+
+    async def do_demote(self, c: Client, msg: dict) -> None:
+        if not self._require_admin(c):
+            return
+        nick = clean_nick(msg.get("nick", ""))
+        row = self.db.member_by_nick(nick)
+        if row is None or not row["is_admin"]:
+            c.enqueue({"t": "srverr", "msg": f"“{nick}” is not an admin"})
+            return
+        if len(self.db.admins()) <= 1:
+            c.enqueue({"t": "srverr", "msg": "cannot demote the last admin"})
+            return
+        self.db.set_admin(row["id"], False)
+        for cl in self.clients:
+            if cl.member_id == row["id"]:
+                cl.is_admin = False
+                cl.enqueue({"t": "srverr", "msg": "you are no longer an admin"})
+        c.enqueue({"t": "srverr", "msg": f"demoted “{row['nick']}”"})
+
+    async def do_autoupdate(self, c: Client, msg: dict) -> None:
+        if not self._require_admin(c):
+            return
+        arg = str(msg.get("mode", "")).strip().lower()
+        if arg in ("on", "off"):
+            self.db.set_meta("autoupdate", "1" if arg == "on" else "0")
+            if arg == "on":
+                c.enqueue({"t": "srverr", "msg":
+                           "auto-update ON — the server will pull new versions "
+                           "from its git remote and restart. Only leave this on "
+                           "if you trust that repository completely."})
+                self.autoupdate_task = asyncio.create_task(self.check_update(c))
+            else:
+                c.enqueue({"t": "srverr", "msg": "auto-update OFF"})
+            return
+        if arg == "now":
+            self.autoupdate_task = asyncio.create_task(self.check_update(c, force=True))
+            return
+        on = self.db.get_meta("autoupdate") == "1"
+        c.enqueue({"t": "srverr", "msg":
+                   f"auto-update is {'ON' if on else 'OFF'} "
+                   "(/autoupdate on|off|now)"})
+
     # ---------- broadcast ----------
 
     def broadcast(self, msg: dict) -> None:
@@ -499,6 +680,7 @@ def main(argv: list[str] | None = None) -> int:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     task = loop.create_task(server.start())
+    server.main_task = task
     # Cancel the *serving* task, not a placeholder future — otherwise SIGTERM
     # is silently ignored and `systemctl restart` blocks until it gives up
     # and SIGKILLs us.
@@ -514,8 +696,13 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         task.cancel()
         log.info("shutting down…")
+        restart = server.restart_requested
         server.shutdown()
         loop.close()
+    if restart:
+        # Exit non-zero so `Restart=on-failure` brings us back on the new code.
+        log.info("exiting for restart onto the updated version")
+        return 1
     return 0
 
 

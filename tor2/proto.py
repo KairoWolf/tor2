@@ -38,6 +38,12 @@ SERVER_DISK_LIMIT = 0.80
 def chunk_size_for(size: int) -> int:
     return BIG_CHUNK if size > MAX_VIDEO_BYTES else VIDEO_CHUNK
 
+# Keepalive, valid in every mode: an idle Tor stream can otherwise be closed
+# by a NAT or relay with no notice.
+KEEPALIVE_TYPES = {"ping", "pong"}
+KEEPALIVE_INTERVAL = 25
+KEEPALIVE_TIMEOUT = 150
+
 # Direct peer-to-peer chat.
 DM_TYPES = {"hello", "accept", "txt", "img", "vmeta", "vchunk"}
 
@@ -50,7 +56,9 @@ SERVER_C2S = {
     "mput",       # announce a media upload (kind, size, sha256, chunks)
     "mchunk",     # a chunk of the announced upload
     "fetch",      # request a stored media blob by id
-    "mkchan", "rmchan", "newinvite", "kick",   # admin only
+    # admin only
+    "mkchan", "rmchan", "newinvite", "kick",
+    "ban", "unban", "bans", "promote", "demote", "autoupdate",
 }
 # Server → client:
 SERVER_S2C = {
@@ -66,7 +74,7 @@ SERVER_S2C = {
 
 # The complete message surface. There is deliberately no file-transfer,
 # command, or code-execution message.
-ALLOWED_TYPES = DM_TYPES | SERVER_C2S | SERVER_S2C
+ALLOWED_TYPES = DM_TYPES | SERVER_C2S | SERVER_S2C | KEEPALIVE_TYPES
 
 
 class ProtocolError(Exception):

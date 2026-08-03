@@ -17,7 +17,8 @@ from textual.widgets import Input, RichLog, Static
 from . import media, proto, store, video
 from .app_consts import RECEIVED_DIR, fmt_size
 from .clientserver import SERVER, ChannelItem, ServerModeMixin
-from .imgview import render_preview, validate_image
+from .imgview import is_animated, render_frames, render_preview, validate_image
+from . import updater
 from .tornet import TorNet, code_to_key, normalize_onion, onion_from_pub
 
 CODE_TTL_S = 15 * 60
@@ -68,6 +69,14 @@ class Tor2App(ServerModeMixin, App):
         dock: bottom;
         border: round $accent;
     }
+    #preview {
+        dock: bottom;
+        height: auto;
+        max-height: 26;
+        padding: 0 1;
+        border: round $success;
+        display: none;
+    }
     """
 
     BINDINGS = [
@@ -90,6 +99,10 @@ class Tor2App(ServerModeMixin, App):
         self.pairing_code: str | None = None
         self._code_timer = None
         self.srv: dict = {}
+        self.cache = media.MediaCache()
+        self._anim_timer = None
+        self._anim: dict | None = None
+        self.last_rx = 0.0
 
     # ---------- layout ----------
 
@@ -101,6 +114,7 @@ class Tor2App(ServerModeMixin, App):
                 yield Vertical(id="chanlist")
                 yield Static(id="onlinelist")
             yield RichLog(id="chat", wrap=True, markup=False)
+        yield Static(id="preview")
         yield Input(placeholder="message…  (/help for commands)", id="inputbar")
 
     # ---------- helpers ----------
@@ -117,6 +131,145 @@ class Tor2App(ServerModeMixin, App):
     def sys_msg(self, msg: str, style: str = "bright_black") -> None:
         self.chat.write(Text(f"  • {msg}", style=style))
 
+    # ---------- previews ----------
+
+    def show_preview(self, data: bytes, label: str = "") -> None:
+        """Draw an image in the chat log; animate it in the pane if it moves."""
+        try:
+            self.chat.write(render_preview(data))
+        except Exception as e:
+            self.sys_msg(f"could not render preview: {e}", "red")
+            return
+        if label:
+            self.sys_msg(label, "bright_black")
+        if is_animated(data):
+            self.sys_msg("animated — playing below (any new preview replaces it)",
+                         "bright_black")
+            self.run_worker(self.animate(data), exclusive=False)
+
+    async def animate(self, data: bytes) -> None:
+        try:
+            frames, delay = await asyncio.to_thread(render_frames, data)
+        except Exception as e:
+            self.sys_msg(f"could not animate: {e}", "red")
+            return
+        if len(frames) < 2:
+            return
+        self.stop_animation()
+        pane = self.query_one("#preview", Static)
+        pane.display = True
+        self._anim = {"frames": frames, "i": 0, "loops": 0, "max_loops": 3}
+        pane.update(frames[0])
+        self._anim_timer = self.set_interval(delay, self._next_frame)
+
+    def _next_frame(self) -> None:
+        a = self._anim
+        if not a:
+            return
+        a["i"] += 1
+        if a["i"] >= len(a["frames"]):
+            a["i"] = 0
+            a["loops"] += 1
+            if a["loops"] >= a["max_loops"]:
+                self.stop_animation()
+                return
+        self.query_one("#preview", Static).update(a["frames"][a["i"]])
+
+    def stop_animation(self) -> None:
+        if self._anim_timer is not None:
+            self._anim_timer.stop()
+            self._anim_timer = None
+        self._anim = None
+        try:
+            self.query_one("#preview", Static).display = False
+        except Exception:
+            pass
+
+    async def cmd_play(self, arg: str) -> None:
+        """/play [id] — replay an animation from the preview cache."""
+        key = arg.strip() or self.cache.last_key
+        if not key:
+            self.sys_msg("nothing to play yet", "red")
+            return
+        got = self.cache.get(key)
+        if got is None:
+            self.sys_msg(f"image {key} is not in the preview cache — "
+                         f"/get {key} downloads it", "red")
+            return
+        await self.animate(got[0])
+
+    def cmd_save(self, arg: str) -> None:
+        """/save [id] — write a previewed image to ./received."""
+        key = arg.strip() or self.cache.last_key
+        if not key:
+            self.sys_msg("nothing to save yet", "red")
+            return
+        got = self.cache.get(key)
+        if got is None:
+            self.sys_msg(f"image {key} is not in the preview cache", "red")
+            return
+        data, ext = got
+        dest = self._next_received("img", ext)
+        dest.write_bytes(data)
+        self.sys_msg(f"saved → {dest}", "green")
+
+    # ---------- keepalive ----------
+
+    async def keepalive(self, session: proto.Session) -> None:
+        """Ping periodically and give up if the peer goes quiet.
+
+        Without this an idle Tor stream can be dropped by a relay or NAT with
+        no notification, and the session only fails on the next real message.
+        """
+        while self.session is session:
+            await asyncio.sleep(proto.KEEPALIVE_INTERVAL)
+            if self.session is not session:
+                return
+            quiet = asyncio.get_event_loop().time() - self.last_rx
+            if quiet > proto.KEEPALIVE_TIMEOUT:
+                self.sys_msg("connection timed out (no reply from the other end)",
+                             "red")
+                await self.drop_session()
+                return
+            try:
+                await session.send({"t": "ping"})
+            except Exception:
+                return
+
+    def touch_rx(self) -> None:
+        self.last_rx = asyncio.get_event_loop().time()
+
+    # ---------- updates ----------
+
+    async def cmd_update(self, arg: str) -> None:
+        """/update — fast-forward this checkout to the latest release."""
+        check_only = arg.strip() in ("check", "--check")
+        self.sys_msg("checking github for a newer version…")
+        try:
+            info = await asyncio.to_thread(updater.check)
+        except updater.UpdateError as e:
+            self.sys_msg(f"update check failed: {e}", "red")
+            return
+        if not info["behind"]:
+            self.sys_msg(f"you are up to date ({info['current']})", "green")
+            return
+        self.sys_msg(f"{info['behind']} new commit(s) available "
+                     f"({info['current']} → {info['latest']}):", "yellow")
+        for line in info["summary"].splitlines()[:5]:
+            self.sys_msg(f"    {line}", "bright_black")
+        if check_only:
+            self.sys_msg("run /update to apply")
+            return
+        try:
+            await asyncio.to_thread(updater.apply)
+        except updater.UpdateError as e:
+            self.sys_msg(f"update failed: {e}", "red")
+            return
+        self.sys_msg("updated ✓ — quit (ctrl+q) and start tor2 again to run it",
+                     "green")
+        self.sys_msg("if dependencies changed, also run: "
+                     ".venv/bin/pip install -r requirements.txt", "bright_black")
+
     def chat_msg(self, who: str, body: str, mine: bool) -> None:
         t = Text()
         t.append(f"{who} ", style="bold cyan" if mine else "bold magenta")
@@ -130,7 +283,7 @@ class Tor2App(ServerModeMixin, App):
         self.status_line = ""
         self.query_one("#inputbar", Input).focus()
         self.sys_msg(f"welcome, {self.nick} — for lawful use only (/help for commands)")
-        self.run_worker(self.start_network(), exclusive=False)
+        self.run_worker(self.start_network(), group="net", exclusive=False)
 
     async def start_network(self) -> None:
         self.sys_msg("bootstrapping tor (first run can take ~60s)…")
@@ -187,7 +340,7 @@ class Tor2App(ServerModeMixin, App):
         self.sys_msg(f"incoming chat request from “{self.peer_nick}”", "yellow")
         self.sys_msg(f"session fingerprint: {session.fingerprint}", "yellow")
         self.sys_msg("type /accept to start chatting, or /reject to refuse", "yellow")
-        self.run_worker(self.recv_loop(session), exclusive=False)
+        self.run_worker(self.recv_loop(session), group="net", exclusive=False)
 
     async def do_accept(self) -> None:
         if self.state != PENDING_IN or self.session is None:
@@ -234,7 +387,7 @@ class Tor2App(ServerModeMixin, App):
         self.set_status("waiting for peer to accept…")
         self.sys_msg("connected — waiting for your peer to accept the chat")
         self.sys_msg(f"session fingerprint: {session.fingerprint}", "green")
-        self.run_worker(self.recv_loop(session), exclusive=False)
+        self.run_worker(self.recv_loop(session), group="net", exclusive=False)
 
     # ---------- pairing codes ----------
 
@@ -311,9 +464,17 @@ class Tor2App(ServerModeMixin, App):
     # ---------- receiving ----------
 
     async def recv_loop(self, session: proto.Session) -> None:
+        self.touch_rx()
+        self.run_worker(self.keepalive(session), group="net", exclusive=False)
         try:
             while True:
                 msg = await session.recv()
+                self.touch_rx()
+                if msg["t"] == "ping":
+                    await session.send({"t": "pong"})
+                    continue
+                if msg["t"] == "pong":
+                    continue
                 await self.handle_message(msg)
         except (asyncio.IncompleteReadError, ConnectionError):
             if self.session is session:
@@ -359,13 +520,12 @@ class Tor2App(ServerModeMixin, App):
         except Exception as e:
             self.sys_msg(f"rejected incoming image: {e}", "red")
             return
-        dest = self._next_received(f"img", fmt)
-        dest.write_bytes(data)
-        self.sys_msg(f"{self.peer_nick} sent an image → {dest.name}", "magenta")
-        try:
-            self.chat.write(render_preview(data))
-        except Exception:
-            self.sys_msg("(no inline preview available)", "yellow")
+        # Previewed, not written to disk: /save decides what is kept.
+        key = f"dm{len(self.cache._items) + 1}"
+        self.cache.put(key, data, fmt)
+        self.sys_msg(f"{self.peer_nick} sent an image ({fmt_size(len(data))})",
+                     "magenta")
+        self.show_preview(data, "/save writes it to ./received")
 
     def handle_video_meta(self, msg: dict) -> None:
         try:
@@ -563,6 +723,9 @@ class Tor2App(ServerModeMixin, App):
         cmd, _, arg = line.partition(" ")
         arg = arg.strip()
 
+        if cmd == "/update":
+            self.run_worker(self.cmd_update(arg), exclusive=False)
+            return
         if cmd in ("/joinserver", "/server"):
             coro = self.join_server(arg) if cmd == "/joinserver" else self.open_server(arg)
             self.run_worker(coro, exclusive=False)
@@ -584,6 +747,10 @@ class Tor2App(ServerModeMixin, App):
                 await self.do_reject()
             case "/img" | "/image":
                 self.run_worker(self.send_image(arg), exclusive=False)
+            case "/play":
+                await self.cmd_play(arg)
+            case "/save":
+                self.cmd_save(arg)
             case "/vid" | "/video":
                 self.run_worker(self.send_video(arg), exclusive=False)
             case "/big-vid" | "/bigvid":
@@ -617,11 +784,13 @@ class Tor2App(ServerModeMixin, App):
                     "/connect <contact-or-onion> — connect to a peer",
                     "/accept · /reject           — answer an incoming chat request",
                     "/img <path>                 — send an image (≤5 MB)",
+                    "/save [id] · /play [id]     — keep or replay a previewed image",
                     "/vid <path>                 — send a video (auto-compressed, ≤10 min)",
                     "/big-vid <path>             — send a long video (any length, ≤3 GB)",
                     "/add <name> [onion]         — save a contact (defaults to current peer)",
                     "/contacts · /delcontact <name>",
                     "/nick <name>                — set your display name (persists)",
+                    "/update                     — get the latest version from github",
                     "/disconnect · ctrl+q",
                     "— servers —",
                     "/joinserver <onion> <invite> [name] — join a tor2 server",
@@ -651,6 +820,10 @@ class Tor2App(ServerModeMixin, App):
                                 exclusive=False)
             case "/get":
                 await self.server_fetch(arg)
+            case "/play":
+                await self.cmd_play(arg)
+            case "/save":
+                self.cmd_save(arg)
             case "/mkchan" | "/rmchan" | "/newinvite" | "/kick":
                 if not self.srv.get("admin"):
                     self.sys_msg("admin only", "red")
@@ -670,15 +843,19 @@ class Tor2App(ServerModeMixin, App):
                     "/img <path>        — post an image (shown inline to everyone)",
                     "/vid <path>        — post a video (others download with /get)",
                     "/big-vid <path>    — post a long video (any length, ≤3 GB)",
-                    "/get <id>          — download a posted video",
+                    "/get <id>          — download a posted image or video",
+                    "/save [id] · /play [id] — keep or replay a previewed image",
                     "/disconnect        — go back to direct-message mode",
                     "/leave             — disconnect and forget this server",
                 ):
                     self.sys_msg(line_)
                 if self.srv.get("admin"):
                     for line_ in (
-                        "admin: /mkchan <name> · /rmchan <name> · /kick <nick>",
+                        "admin: /mkchan <name> · /rmchan <name>",
+                        "admin: /kick <nick> · /ban <nick> [reason] · /unban <nick> · /bans",
+                        "admin: /promote <nick> · /demote <nick>  — grant or remove admin",
                         "admin: /newinvite [uses] [admin]  — mint an invite code",
+                        "admin: /autoupdate on|off|now     — auto-update from github",
                     ):
                         self.sys_msg(line_, "cyan")
             case _:

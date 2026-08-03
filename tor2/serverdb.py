@@ -53,6 +53,11 @@ CREATE TABLE IF NOT EXISTS invites(
     uses_left INTEGER NOT NULL,
     is_admin INTEGER NOT NULL DEFAULT 0,
     created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS bans(
+    nick TEXT PRIMARY KEY,
+    reason TEXT,
+    by_nick TEXT,
+    created REAL NOT NULL);
 """
 
 
@@ -150,6 +155,43 @@ class ServerDB:
 
     def member_count(self) -> int:
         return self.db.execute("SELECT COUNT(*) c FROM members").fetchone()["c"]
+
+    def set_admin(self, member_id: int, is_admin: bool) -> None:
+        self.db.execute("UPDATE members SET is_admin=? WHERE id=?",
+                        (int(is_admin), member_id))
+        self.db.commit()
+
+    def admins(self) -> list[str]:
+        return [r["nick"] for r in
+                self.db.execute("SELECT nick FROM members WHERE is_admin=1 "
+                                "ORDER BY nick")]
+
+    # ---------- bans ----------
+
+    def ban(self, nick: str, reason: str, by_nick: str) -> None:
+        """Ban by nickname and revoke the membership behind it."""
+        self.db.execute(
+            "INSERT INTO bans(nick,reason,by_nick,created) VALUES(?,?,?,?) "
+            "ON CONFLICT(nick) DO UPDATE SET reason=excluded.reason, "
+            "by_nick=excluded.by_nick, created=excluded.created",
+            (nick.lower(), reason[:200], by_nick, time.time()))
+        row = self.member_by_nick(nick)
+        if row:
+            self.db.execute("DELETE FROM members WHERE id=?", (row["id"],))
+        self.db.commit()
+
+    def unban(self, nick: str) -> bool:
+        cur = self.db.execute("DELETE FROM bans WHERE nick=?", (nick.lower(),))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def is_banned(self, nick: str) -> bool:
+        return self.db.execute("SELECT 1 FROM bans WHERE nick=?",
+                               (nick.lower(),)).fetchone() is not None
+
+    def bans(self) -> list[dict]:
+        return [{"nick": r["nick"], "reason": r["reason"], "by": r["by_nick"]}
+                for r in self.db.execute("SELECT * FROM bans ORDER BY nick")]
 
     # ---------- channels ----------
 
