@@ -364,16 +364,23 @@ fun StartChatSheet(vm: AppViewModel, onClose: () -> Unit) {
 
             HorizontalDivider(Modifier.padding(vertical = 16.dp))
             Text("Your address", style = MaterialTheme.typography.titleMedium)
+            val addressError by vm.addressError.collectAsState()
             Surface(color = MaterialTheme.colorScheme.surfaceVariant,
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
                 Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(myAddress ?: "publishing…", Modifier.weight(1f),
-                         style = MaterialTheme.typography.bodyMedium, maxLines = 2)
-                    IconButton(onClick = {
-                        myAddress?.let { clipboard.setText(AnnotatedString(it)) }
-                    }, enabled = myAddress != null) {
-                        Icon(Icons.Default.ContentCopy, "copy")
+                    Text(myAddress ?: addressError ?: "publishing…",
+                         Modifier.weight(1f),
+                         style = MaterialTheme.typography.bodyMedium, maxLines = 3,
+                         color = if (myAddress == null && addressError != null)
+                             MaterialTheme.colorScheme.error
+                         else MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (myAddress != null) {
+                        IconButton(onClick = {
+                            clipboard.setText(AnnotatedString(myAddress!!))
+                        }) { Icon(Icons.Default.ContentCopy, "copy") }
+                    } else if (addressError != null) {
+                        TextButton(onClick = { vm.retryAddress() }) { Text("Retry") }
                     }
                 }
             }

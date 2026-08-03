@@ -32,6 +32,9 @@ class TorNet(private val context: Context) {
     private var control: TorControlConnection? = null
     private var serviceId: String? = null
 
+    /** Asked again each time, because the service hands it over late. */
+    @Volatile var controlProvider: (() -> TorControlConnection?)? = null
+
     /**
      * Wait until Tor is genuinely usable, reporting Tor's own bootstrap
      * percentage rather than a made-up one that stalls short of the end.
@@ -86,20 +89,44 @@ class TorNet(private val context: Context) {
     }
 
     /**
+     * The control connection is not available the moment the service binds —
+     * Tor has to come up first — so keep asking rather than giving up and
+     * leaving the address stuck on "publishing".
+     */
+    private suspend fun awaitControl(timeoutMs: Long = 120_000): TorControlConnection? =
+        withContext(Dispatchers.IO) {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                control?.let { return@withContext it }
+                runCatching { controlProvider?.invoke() }.getOrNull()?.let {
+                    control = it
+                    return@withContext it
+                }
+                Thread.sleep(1500)
+            }
+            null
+        }
+
+    /**
      * Publish an onion service pointing at a local port, so other people can
      * start a chat with this phone. Reuses a saved key so the address stays
      * the same, which is what makes it worth sharing with a friend.
      */
     suspend fun publishOnion(localPort: Int, keyBlob: String?): Pair<String, String>? =
         withContext(Dispatchers.IO) {
-            val conn = control ?: return@withContext null
+            val conn = awaitControl() ?: return@withContext null
             val keyArg = keyBlob?.takeIf { it.isNotBlank() } ?: "NEW:ED25519-V3"
             val ports = HashMap<Int, String>()
             ports[80] = "127.0.0.1:$localPort"
-            val reply = runCatching { conn.addOnion(keyArg, ports, null) }
-                .getOrNull() ?: return@withContext null
-            val id = reply["ServiceID"] ?: return@withContext null
-            val priv = reply["PrivateKey"] ?: keyBlob ?: ""
+            var reply: Map<String, String>? = null
+            repeat(20) {                       // tor may still be finding its feet
+                reply = runCatching { conn.addOnion(keyArg, ports, null) }.getOrNull()
+                if (reply != null) return@repeat
+                Thread.sleep(3000)
+            }
+            reply ?: return@withContext null
+            val id = reply!!["ServiceID"] ?: return@withContext null
+            val priv = reply!!["PrivateKey"] ?: keyBlob ?: ""
             serviceId = id
             myOnion.value = "$id.onion"
             Pair("$id.onion", priv)
@@ -108,7 +135,7 @@ class TorNet(private val context: Context) {
     /** Publish the address a short code derives, so the digits reach us. */
     suspend fun publishCodeOnion(code: String, localPort: Int, person: String):
             String? = withContext(Dispatchers.IO) {
-        val conn = control ?: return@withContext null
+        val conn = awaitControl() ?: return@withContext null
         val (expanded, pub) = Codes.keyFor(code, person)
         val blob = "ED25519-V3:" + android.util.Base64.encodeToString(
             expanded, android.util.Base64.NO_WRAP)

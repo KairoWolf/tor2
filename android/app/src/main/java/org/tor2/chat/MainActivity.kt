@@ -36,6 +36,10 @@ class MainActivity : AppCompatActivity() {
             // callback runs on the main thread — doing it here froze the app.
             lifecycleScope.launch(Dispatchers.IO) {
                 val torService = binder.service
+                // Ask again later too: it is null until Tor is actually up.
+                vm.tor.controlProvider = {
+                    runCatching { torService.torControlConnection }.getOrNull()
+                }
                 runCatching { torService.torControlConnection }
                     .getOrNull()?.let { vm.tor.attachControl(it) }
                 val port = runCatching { torService.socksPort }.getOrDefault(0)

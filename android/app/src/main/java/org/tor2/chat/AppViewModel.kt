@@ -65,12 +65,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         inbound = server
         server.start()
         viewModelScope.launch {
-            val published = tor.publishOnion(server.port, store.onionKey)
+            var published = tor.publishOnion(server.port, store.onionKey)
+            var attempt = 0
+            while (published == null && attempt < 3) {   // tor can be slow to settle
+                attempt += 1
+                kotlinx.coroutines.delay(10_000)
+                published = tor.publishOnion(server.port, store.onionKey)
+            }
             if (published == null) {
-                banner.value = "could not publish an address — others cannot " +
-                        "start a chat with you, but you can still start one"
+                addressError.value = "Could not publish an address. You can still " +
+                        "start chats and join servers; others just cannot start " +
+                        "a chat with you until this works."
             } else {
                 store.onionKey = published.second
+                addressError.value = null
             }
         }
     }
@@ -209,6 +217,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     val pairingCode = MutableStateFlow<String?>(null)
+    val addressError = MutableStateFlow<String?>(null)
+
+    /** Try publishing our address again, after a failure. */
+    fun retryAddress() {
+        addressError.value = null
+        listening = false
+        startListening()
+    }
 
     fun clearChatCode() {
         pairingCode.value?.let { code ->
