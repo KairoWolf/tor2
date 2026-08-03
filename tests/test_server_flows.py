@@ -141,7 +141,9 @@ async def main():
         c = await connect(port); await c.expect("srvhello")
         await c.send(t="auth", token=btoken, nick="ignored")
         okc = await c.expect("authok")
-        assert okc["nick"] == "mia" and okc["token"] is None
+        # empty, never null: a null is stringified as "null" by some clients
+        assert okc["nick"] == "mia" and not okc["token"]
+        assert okc["token"] == "", f"token must be empty, not {okc['token']!r}"
         hist = await c.expect("histbatch")
         assert any(m.get("body") == "hello everyone" for m in hist["msgs"]), hist
         print("token reconnect + history OK")
