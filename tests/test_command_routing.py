@@ -123,7 +123,7 @@ def test_server_only_commands_explain_themselves_in_a_dm():
             await app.action_quit()
             return said
     said = asyncio.run(go())
-    assert any("only works on a server" in m for m in said), said
+    assert any("needs a server" in m for m in said), said
     assert not any("unknown command" in m for m in said), said
 
 
