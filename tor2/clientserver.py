@@ -173,8 +173,12 @@ class ServerModeMixin:
                 await self.handle_server_msg(msg)
         except (asyncio.IncompleteReadError, ConnectionError):
             if self.session is session:
-                self.sys_msg("connection to the server dropped", "red")
-                lost = True
+                refusal = self.srv.get("refusal")
+                if refusal:
+                    self.sys_msg(f"the server refused: {refusal}", "red")
+                else:
+                    self.sys_msg("connection to the server dropped", "red")
+                    lost = True
         except Exception as e:
             if self.session is session:
                 self.sys_msg(f"server session error: {e}", "red")
@@ -228,7 +232,11 @@ class ServerModeMixin:
             self.srv["online"] = [str(n) for n in msg.get("online", [])]
             self.refresh_sidebar()
         elif kind == "srverr":
-            self.sys_msg(str(msg.get("msg", ""))[:400], "yellow")
+            text = str(msg.get("msg", ""))[:400]
+            self.sys_msg(text, "yellow")
+            if self.state != SERVER or not self.srv.get("channel"):
+                # a refusal, not a passing notice: the socket is about to close
+                self.srv["refusal"] = text
         elif kind == "deleted":
             self.srv_deleted(msg)
         elif kind == "mthumb":

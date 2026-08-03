@@ -46,6 +46,14 @@ class ServerClient(
     private var download: Download? = null
     private var permanentAddress: String? = null
 
+    /**
+     * A refusal from the server — a spent code, a revoked membership — arrives
+     * as a message and is immediately followed by the socket closing. Without
+     * remembering it, the close looks like a dropped circuit and we would
+     * retry forever while showing "reconnecting" instead of the reason.
+     */
+    private var refusal: String? = null
+
     private class Download(
         val info: MediaInfo,
         val file: File,
@@ -55,6 +63,7 @@ class ServerClient(
 
     suspend fun connect(invite: String = "", joinCode: String = "") {
         manualClose = false
+        refusal = null
         state.value = ConnState.Connecting
         try {
             val target = permanentAddress ?: saved.onion
@@ -80,7 +89,7 @@ class ServerClient(
             loop = scope.launch { receiveLoop(s) }
             scope.launch { keepalive(s) }
         } catch (e: Exception) {
-            notice.value = e.message ?: "could not connect"
+            notice.value = e.message ?: "Could not connect"
             state.value = ConnState.Failed
             scheduleReconnect()
         }
@@ -107,10 +116,17 @@ class ServerClient(
             }
         } catch (e: Exception) {
             if (session === s && !manualClose) {
-                notice.value = "connection dropped — reconnecting"
-                state.value = ConnState.Failed
                 session = null
-                scheduleReconnect()
+                state.value = ConnState.Failed
+                val why = refusal
+                if (why != null) {
+                    // the server told us why; retrying will not change it
+                    notice.value = why
+                    refusal = null
+                } else {
+                    notice.value = "Connection dropped — reconnecting"
+                    scheduleReconnect()
+                }
             }
         }
     }
@@ -193,7 +209,11 @@ class ServerClient(
                 }
                 notice.value = "a message was deleted"
             }
-            "srverr" -> notice.value = j.optString("msg")
+            "srverr" -> {
+                val text = j.optString("msg")
+                notice.value = text
+                if (state.value != ConnState.Connected) refusal = text
+            }
             "mthumb" -> {
                 val data = Base64.decode(j.optString("thumb"), Base64.DEFAULT)
                 notice.value = "preview: ${j.optString("name").ifBlank { "#${j.optInt("id")}" }}"

@@ -202,7 +202,7 @@ class Tor2Server:
         wtask = asyncio.create_task(client.writer_loop())
         try:
             await session.send({"t": "srvhello", "name": self.name,
-                                "proto": 3})
+                                "proto": 4})
             while True:
                 msg = await session.recv()
                 await self.dispatch(client, msg)

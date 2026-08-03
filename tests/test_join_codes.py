@@ -115,3 +115,31 @@ def test_authok_reports_the_permanent_address():
             aio.close()
             srv.db.close()
     asyncio.run(go())
+
+
+def test_a_spent_code_is_refused_with_a_reason_not_a_silent_close():
+    """The reason must arrive before the socket closes, or a client cannot
+    tell a refusal from a dropped circuit and will retry forever."""
+    async def go():
+        with tempfile.TemporaryDirectory() as tmp:
+            srv = Tor2Server(Path(tmp))
+            code = srv.db.create_join_code(uses=1)
+            aio = await asyncio.start_server(srv.handle_conn, "127.0.0.1", 0)
+            port = aio.sockets[0].getsockname()[1]
+
+            r, w = await asyncio.open_connection("127.0.0.1", port)
+            s = await proto.handshake(r, w)
+            await s.recv()
+            await s.send({"t": "auth", "nick": "first", "code": code})
+            assert (await asyncio.wait_for(s.recv(), timeout=10))["t"] == "authok"
+
+            r2, w2 = await asyncio.open_connection("127.0.0.1", port)
+            s2 = await proto.handshake(r2, w2)
+            await s2.recv()
+            await s2.send({"t": "auth", "nick": "second", "code": code})
+            err = await asyncio.wait_for(s2.recv(), timeout=10)
+            assert err["t"] == "srverr", err
+            assert "invalid" in err["msg"] or "used" in err["msg"], err
+            aio.close()
+            srv.db.close()
+    asyncio.run(go())
