@@ -291,18 +291,19 @@ class Tor2Server:
     async def do_mput(self, c: Client, msg: dict) -> None:
         try:
             kind = str(msg.get("kind", ""))
-            if kind not in ("img", "vid"):
+            if kind not in ("img", "vid", "aud"):
                 raise ValueError("bad media kind")
             size = int(msg.get("size", 0))
             chunks = int(msg.get("chunks", 0))
-            cap = (proto.MAX_IMAGE_BYTES if kind == "img"
-                   else proto.MAX_BIG_VIDEO_BYTES)
+            cap = {"img": proto.MAX_IMAGE_BYTES,
+                   "aud": proto.MAX_AUDIO_BYTES}.get(
+                       kind, proto.MAX_BIG_VIDEO_BYTES)
             if not (0 < size <= cap):
                 raise ValueError(f"too large (max {cap // 1024 // 1024} MB)")
             if not media.plausible_chunk_count(size, chunks):
                 raise ValueError("bad chunk count")
-            ext = re.sub(r"[^a-z0-9]", "", str(msg.get("ext", ""))[:5]) or (
-                "png" if kind == "img" else "mp4")
+            ext = re.sub(r"[^a-z0-9]", "", str(msg.get("ext", ""))[:5]) or {
+                "img": "png", "aud": "mp3"}.get(kind, "mp4")
             chan = str(msg.get("chan", c.channel))
             if self.db.channel_id(chan) is None:
                 raise ValueError("no such channel")

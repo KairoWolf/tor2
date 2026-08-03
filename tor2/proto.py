@@ -26,6 +26,7 @@ INNER_PERSON = b"tor2-inner-v1"
 
 MAX_FRAME = 16 * 1024 * 1024
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_AUDIO_BYTES = 200 * 1024 * 1024
 MAX_VIDEO_BYTES = 60 * 1024 * 1024        # /vid — quick clips
 MAX_BIG_VIDEO_BYTES = 3 * 1024 * 1024 * 1024   # /big-vid — any length
 VIDEO_CHUNK = 512 * 1024

@@ -97,3 +97,59 @@ def thumbnail(path: Path, at_second: float = 1.0) -> bytes | None:
 def validate_received(path: Path) -> None:
     """Confirm received bytes actually decode as a video before keeping them."""
     probe(path)
+
+
+AUDIO_EXTS = {"mp3", "m4a", "aac", "ogg", "opus", "flac", "wav", "wma"}
+MAX_AUDIO_BYTES = 200 * 1024 * 1024
+AUDIO_BITRATE = "96k"
+
+
+def probe_audio(path: Path) -> dict:
+    """Return {'duration': float, 'codec': str} for a file with audio."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name:format=duration",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise ValueError("ffmpeg/ffprobe is not installed") from None
+    if out.returncode != 0:
+        raise ValueError("ffprobe could not read this file")
+    info = json.loads(out.stdout)
+    streams = info.get("streams") or []
+    if not streams:
+        raise ValueError("no audio stream found")
+    return {"duration": float(info.get("format", {}).get("duration", 0) or 0),
+            "codec": streams[0].get("codec_name", "?")}
+
+
+def compress_audio(src: Path, dest: Path, on_progress=None,
+                   duration: float = 0.0) -> None:
+    """Transcode to a small mp3 — universally playable, and much smaller."""
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(src),
+           "-vn", "-c:a", "libmp3lame", "-b:a", AUDIO_BITRATE]
+    if on_progress and duration > 0:
+        cmd += ["-progress", "pipe:1", "-nostats"]
+    cmd.append(str(dest))
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError:
+        raise ValueError("ffmpeg is not installed") from None
+    if on_progress and duration > 0:
+        for line in proc.stdout:
+            m = _TIME_RE.search(line)
+            if m:
+                on_progress(min(0.999, int(m.group(1)) / 1_000_000 / duration))
+    stderr = proc.communicate()[1]
+    if proc.returncode != 0:
+        tail = (stderr or "").strip().splitlines()
+        raise ValueError(
+            f"ffmpeg failed: {tail[-1] if tail else 'unknown error'}")
+    if on_progress:
+        on_progress(1.0)
+
+
+def validate_audio(path: Path) -> None:
+    probe_audio(path)

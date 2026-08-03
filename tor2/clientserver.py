@@ -20,7 +20,7 @@ from .imgview import render_preview, validate_image
 from .tornet import normalize_onion
 
 # imported lazily from app to avoid a circular import at module load
-from .app_consts import RECEIVED_DIR, fmt_size
+from .app_consts import RECEIVED_DIR, fmt_duration, fmt_size
 from .conv import current as current_conv
 
 SERVER = "server"
@@ -281,11 +281,13 @@ class ServerModeMixin:
     def srv_event(self, msg: dict) -> None:
         chan = str(msg.get("chan", ""))
         mine = str(msg.get("nick")) == self.nick
+        if mine and self.drop_pending(chan, msg):
+            return                     # already shown by local echo
         mentioned = (not mine) and self.mentions_me(str(msg.get("body") or ""))
         line = self.render_event(msg, mentioned=mentioned)
         self.srv["buffers"].setdefault(chan, []).append(line)
         if mentioned:
-            self.bell()
+            self.notify_user(f"{msg.get('nick')} mentioned you in #{chan}", True)
             if chan != self.srv["channel"]:
                 self.sys_msg(f"{msg.get('nick')} mentioned you in #{chan}", "red")
         if chan == self.srv["channel"]:
@@ -304,6 +306,8 @@ class ServerModeMixin:
                 self.mark_active_channel()
         if not mine:
             self.bump_unread(self.conv, mentioned)
+            if not mentioned and self.conv is not self.active:
+                self.notify_user(f"new message in #{chan}")
 
     def srv_deleted(self, msg: dict) -> None:
         chan = str(msg.get("chan", ""))
@@ -313,6 +317,25 @@ class ServerModeMixin:
         if chan == self.srv.get("channel") and self.session is not None:
             self.run_worker(self.session.send({"t": "history", "chan": chan}),
                             exclusive=False)
+
+    def drop_pending(self, chan: str, msg: dict) -> bool:
+        """Reconcile the server's echo with the copy we drew locally.
+
+        Returns True if this message was already on screen, in which case the
+        local line is upgraded in place with the id the server assigned.
+        """
+        pend = self.srv.get("pending") or []
+        body = str(msg.get("body", ""))
+        for i, (pchan, pbody, line) in enumerate(pend):
+            if pchan == chan and pbody == body:
+                pend.pop(i)
+                mid = msg.get("id")
+                if mid is not None and not line.plain.startswith(f"{line.plain[:5]}[{mid}]"):
+                    line.append(f"  [{mid}]", style="bright_black")
+                    if chan == self.srv.get("channel") and self.conv is self.active:
+                        self.redraw_channel()
+                return True
+        return False
 
     def mentions_me(self, body: str) -> bool:
         """@nick, or the bare nick as a whole word."""
@@ -348,7 +371,7 @@ class ServerModeMixin:
         t.append("▸ ", style="bright_black")
         info = m.get("media")
         if info:
-            kind = "image" if info.get("kind") == "img" else "video"
+            kind = {"img": "image", "aud": "audio"}.get(info.get("kind"), "video")
             t.append(f"[{kind} · {fmt_size(info.get('size', 0))}] ", style="magenta")
             t.append(f"/get {info.get('id')}", style="bold cyan")
         else:
@@ -401,6 +424,7 @@ class ServerModeMixin:
         self.srv["download"] = {"sink": sink, "kind": str(msg.get("kind", "vid")),
                                 "ext": ext, "id": msg.get("id")}
         self.sys_msg(f"downloading {fmt_size(size)}…", "magenta")
+        self.start_transfer("downloading", size)
 
     async def srv_mgchunk(self, msg: dict) -> None:
         dl = self.srv.get("download")
@@ -415,13 +439,14 @@ class ServerModeMixin:
             self.sys_msg(f"download failed: {e}", "red")
             self.update_server_status()
             return
-        self.progress("downloading", sink.got / sink.size)
+        self.transfer_progress(sink.got)
         if not sink.complete:
             return
 
         self.srv["download"] = None
         self.progress_done()
-        dest = self._next_received("img" if dl["kind"] == "img" else "vid", dl["ext"])
+        prefix = {"img": "img", "aud": "aud"}.get(dl["kind"], "vid")
+        dest = self._next_received(prefix, dl["ext"])
         try:
             await asyncio.to_thread(sink.finish, dest)
         except (ValueError, OSError) as e:
@@ -444,7 +469,7 @@ class ServerModeMixin:
                 self.show_preview(data)
             except Exception:
                 pass
-        else:
+        elif dl["kind"] == "vid":
             await self.preview_video(dest)
         self.update_server_status()
 
@@ -460,8 +485,16 @@ class ServerModeMixin:
     async def server_post(self, body: str) -> None:
         if not self._srv_ready():
             return
-        await self.session.send({"t": "post", "chan": self.srv["channel"],
-                                 "body": body})
+        chan = self.srv["channel"]
+        # Draw it straight away: waiting for the server's echo over Tor makes
+        # your own typing feel a second slow.
+        pending = self.render_event({"nick": self.nick, "ts": time.time(),
+                                     "body": body, "id": None})
+        self.srv["buffers"].setdefault(chan, []).append(pending)
+        self.srv.setdefault("pending", []).append((chan, body, pending))
+        if chan == self.srv.get("channel") and self.conv is self.active:
+            self.chat.write(pending)
+        await self.session.send({"t": "post", "chan": chan, "body": body})
 
     async def server_switch(self, chan: str) -> None:
         if not self._srv_ready():
@@ -492,7 +525,14 @@ class ServerModeMixin:
             self.sys_msg(f"no such file: {path}", "red")
             return
         thumb = None
-        if kind == "img":
+        if kind == "aud":
+            prepared = await self.prepare_audio(path)
+            if prepared is None:
+                self.update_server_status()
+                return
+            payload, tmpdir = prepared
+            ext = "mp3"
+        elif kind == "img":
             blob = path.read_bytes()
             if len(blob) > proto.MAX_IMAGE_BYTES:
                 self.sys_msg("image too large (5 MB max)", "red")
@@ -522,14 +562,15 @@ class ServerModeMixin:
             if kind == "vid":
                 self.sys_msg(f"uploading {fmt_size(size)} "
                              "(tor is slow — this can take a while)")
+            self.start_transfer("uploading", size)
+            self.progress("uploading", 0.0, "checksumming…")
             sha = await asyncio.to_thread(media.sha256_file, payload)
             await media.send_file(
                 self.session, payload,
                 {"t": "mput", "kind": kind, "ext": ext, "chan": self.srv["channel"],
                  "thumb": base64.b64encode(thumb).decode() if thumb else None},
                 "mchunk", proto.chunk_size_for(size), sha,
-                on_progress=lambda sent, total: self.progress(
-                    "uploading", sent / total),
+                on_progress=lambda sent, total: self.transfer_progress(sent),
                 keep_going=lambda: self.state == SERVER)
         except ConnectionError:
             self.sys_msg("upload aborted: session ended", "red")

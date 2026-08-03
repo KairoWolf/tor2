@@ -14,8 +14,8 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Input, RichLog, Static
 
-from . import media, proto, store, video
-from .app_consts import RECEIVED_DIR, fmt_size
+from . import media, proto, settings, store, video
+from .app_consts import RECEIVED_DIR, fmt_duration, fmt_size
 from .clientserver import SERVER, ChannelItem, ServerModeMixin
 from .conv import ConvItem, Conversation, LogProxy, current as current_conv
 from .imgview import is_animated, render_frames, render_preview, validate_image
@@ -319,38 +319,110 @@ class Tor2App(ServerModeMixin, App):
     def sys_msg(self, msg: str, style: str = "bright_black") -> None:
         self.chat.write(Text(f"  • {msg}", style=style))
 
+    # ---------- settings ----------
+
+    def apply_settings(self) -> None:
+        """Re-read settings and apply the ones that change how things look."""
+        cfg = settings.load()
+        self.opts = cfg
+        theme = {"dark": "textual-dark", "light": "textual-light",
+                 "midnight": "nord", "high-contrast": "monokai"}.get(
+                     str(cfg.get("theme", "dark")), "textual-dark")
+        try:
+            self.theme = theme
+        except Exception:
+            pass
+
+    def notify_user(self, text: str, mention: bool = False) -> None:
+        """Sound and/or desktop notification, both off unless enabled."""
+        cfg = getattr(self, "opts", None) or settings.load()
+        if cfg.get("notify_sound") and (mention or cfg.get("notify_all")):
+            self.bell()
+        if cfg.get("desktop_notify") and (mention or cfg.get("notify_all")):
+            self.run_worker(self._desktop_notify(text), exclusive=False)
+
+    async def _desktop_notify(self, text: str) -> None:
+        import shutil as _sh
+        if not _sh.which("notify-send"):
+            return
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "notify-send", "tor2", text[:200],
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+            await proc.wait()
+        except Exception:
+            pass
+
+    def preview_width(self) -> int:
+        cfg = getattr(self, "opts", None) or settings.load()
+        return settings.PREVIEW_WIDTHS.get(str(cfg.get("preview_size", "medium")), 60)
+
     # ---------- progress ----------
 
-    def progress(self, label: str, fraction: float) -> None:
-        """Show a labelled bar above the input bar. fraction >= 1 finishes it."""
+    def progress(self, label: str, fraction: float, detail: str = "") -> None:
+        """Show a labelled bar above the input bar.
+
+        Stays on screen until :meth:`progress_done`, so a transfer that has
+        not yet finished its first chunk still shows something happening.
+        """
         bar = self.query_one("#progress", Static)
-        if fraction >= 1.0:
-            bar.display = False
-            return
         width = 28
-        filled = max(0, min(width, round(fraction * width)))
+        filled = max(0, min(width, round(max(0.0, min(1.0, fraction)) * width)))
         meter = "█" * filled + "░" * (width - filled)
-        bar.update(f"{label} ▕{meter}▏ {fraction * 100:3.0f}%")
+        text = f"{label} ▕{meter}▏ {fraction * 100:3.0f}%"
+        if detail:
+            text += f"  {detail}"
+        self.progress_text = text
+        bar.update(text)
         bar.display = True
 
     def progress_done(self) -> None:
         self.query_one("#progress", Static).display = False
+        self._xfer = None
+
+    def start_transfer(self, label: str, total: int) -> None:
+        """Begin a transfer readout: bar, throughput and time remaining."""
+        self._xfer = {"label": label, "total": max(1, total),
+                      "t0": asyncio.get_event_loop().time()}
+        self.progress(label, 0.0, "starting…")
+
+    def transfer_progress(self, done: int) -> None:
+        x = getattr(self, "_xfer", None)
+        if not x:
+            return
+        elapsed = max(0.001, asyncio.get_event_loop().time() - x["t0"])
+        rate = done / elapsed
+        frac = done / x["total"]
+        detail = f"{fmt_size(done)}/{fmt_size(x['total'])}"
+        if rate > 1024:
+            detail += f" · {fmt_size(int(rate))}/s"
+            remaining = (x["total"] - done) / rate
+            if remaining > 1:
+                detail += f" · {fmt_duration(remaining)} left"
+        self.progress(x["label"], frac, detail)
 
     # ---------- previews ----------
 
     def show_preview(self, data: bytes, label: str = "") -> None:
         """Draw an image in the chat log; animate it in the pane if it moves."""
+        cfg = getattr(self, "opts", None) or settings.load()
+        if not cfg.get("show_previews", True):
+            self.sys_msg("(previews are off — /settings to enable)", "bright_black")
+            return
         try:
-            self.chat.write(render_preview(data))
+            self.chat.write(render_preview(data, width=self.preview_width()))
         except Exception as e:
             self.sys_msg(f"could not render preview: {e}", "red")
             return
         if label:
             self.sys_msg(label, "bright_black")
         if is_animated(data):
-            self.sys_msg("animated — playing below (any new preview replaces it)",
-                         "bright_black")
-            self.run_worker(self.animate(data), exclusive=False)
+            if cfg.get("autoplay_gifs", True):
+                self.sys_msg("animated — playing below", "bright_black")
+                self.run_worker(self.animate(data), exclusive=False)
+            else:
+                self.sys_msg("animated — /play to watch it", "bright_black")
 
     async def animate(self, data: bytes) -> None:
         try:
@@ -488,6 +560,7 @@ class Tor2App(ServerModeMixin, App):
 
     def on_mount(self) -> None:
         self.status_line = ""
+        self.apply_settings()
         self.query_one("#inputbar", Input).focus()
         self.sys_msg(f"welcome, {self.nick} — for lawful use only (/help for commands)")
         self.run_worker(self.start_network(), group="net", exclusive=False)
@@ -759,6 +832,7 @@ class Tor2App(ServerModeMixin, App):
                                                tmp_dir=RECEIVED_DIR)
         self.sys_msg(f"{self.peer_nick} is sending a video ({fmt_size(size)})…",
                      "magenta")
+        self.start_transfer(f"receiving from {self.peer_nick}", size)
 
     async def handle_video_chunk(self, msg: dict) -> None:
         sink = self._incoming_video
@@ -772,7 +846,7 @@ class Tor2App(ServerModeMixin, App):
             self.sys_msg(f"rejected video: {e}", "red")
             self.set_status(f"connected to “{self.peer_nick}” ✓")
             return
-        self.progress(f"receiving from {self.peer_nick}", sink.got / sink.size)
+        self.transfer_progress(sink.got)
         if not sink.complete:
             return
 
@@ -820,8 +894,8 @@ class Tor2App(ServerModeMixin, App):
     async def send_text(self, body: str) -> None:
         if not self._require_connected():
             return
+        self.chat_msg(self.nick, body, mine=True)   # draw before the round trip
         await self.session.send({"t": "txt", "body": body})
-        self.chat_msg(self.nick, body, mine=True)
 
     async def send_image(self, path_str: str) -> None:
         if not self._require_connected():
@@ -839,7 +913,10 @@ class Tor2App(ServerModeMixin, App):
         except Exception as e:
             self.sys_msg(f"not a supported image: {e}", "red")
             return
+        self.start_transfer("sending image", len(data))
+        self.progress("sending image", 0.5)
         await self.session.send({"t": "img", "data": base64.b64encode(data).decode()})
+        self.progress_done()
         self.chat.write(render_preview(data))
         self.sys_msg(f"image sent ({len(data) // 1024} KB)", "green")
 
@@ -863,12 +940,13 @@ class Tor2App(ServerModeMixin, App):
             size = payload.stat().st_size
             self.sys_msg(f"sending video: {fmt_size(size)} "
                          f"(tor is slow — this can take a while)")
+            self.start_transfer("sending video", size)
+            self.progress("sending video", 0.0, "checksumming…")
             sha = await asyncio.to_thread(media.sha256_file, payload)
             await media.send_file(
                 self.session, payload, {"t": "vmeta"}, "vchunk",
                 proto.chunk_size_for(size), sha,
-                on_progress=lambda sent, total: self.progress(
-                    "sending video", sent / total),
+                on_progress=lambda sent, total: self.transfer_progress(sent),
                 keep_going=lambda: self.state == CONNECTED)
         except ConnectionError:
             self.sys_msg("video send aborted: session ended", "red")
@@ -889,6 +967,70 @@ class Tor2App(ServerModeMixin, App):
             self.chat.write(render_preview(thumb, width=44))
         except Exception:
             pass
+
+    async def prepare_audio(self, src: Path):
+        """Probe and transcode audio to mp3. Returns (path, tmpdir) or None."""
+        if not video.have_ffmpeg():
+            self.sys_msg("ffmpeg is required to send audio", "red")
+            return None
+        if src.stat().st_size > video.MAX_AUDIO_BYTES:
+            self.sys_msg(f"audio too large (max {fmt_size(video.MAX_AUDIO_BYTES)})",
+                         "red")
+            return None
+        try:
+            info = await asyncio.to_thread(video.probe_audio, src)
+        except Exception as e:
+            self.sys_msg(f"not a readable audio file: {e}", "red")
+            return None
+
+        self.sys_msg(f"converting {src.name} "
+                     f"({fmt_duration(info['duration'])} of {info['codec']})…")
+
+        def on_progress(fraction: float) -> None:
+            self.call_from_thread(self.progress, "converting audio", fraction)
+
+        tmpdir = tempfile.TemporaryDirectory(prefix="tor2aud-")
+        out = Path(tmpdir.name) / "out.mp3"
+        try:
+            await asyncio.to_thread(video.compress_audio, src, out, on_progress,
+                                    info["duration"])
+        except Exception as e:
+            self.progress_done()
+            self.sys_msg(str(e), "red")
+            tmpdir.cleanup()
+            return None
+        self.progress_done()
+        self.sys_msg(f"converted to mp3: {fmt_size(out.stat().st_size)}", "green")
+        return out, tmpdir
+
+    async def send_audio(self, path_str: str) -> None:
+        """Direct-message audio: transcoded to mp3 and streamed like video."""
+        if not self._require_connected():
+            return
+        src = Path(path_str).expanduser()
+        if not src.is_file():
+            self.sys_msg(f"no such file: {src}", "red")
+            return
+        prepared = await self.prepare_audio(src)
+        if prepared is None:
+            return
+        payload, tmpdir = prepared
+        try:
+            size = payload.stat().st_size
+            self.start_transfer("sending audio", size)
+            sha = await asyncio.to_thread(media.sha256_file, payload)
+            await media.send_file(
+                self.session, payload, {"t": "vmeta", "audio": True}, "vchunk",
+                proto.chunk_size_for(size), sha,
+                on_progress=lambda sent, total: self.transfer_progress(sent),
+                keep_going=lambda: self.state == CONNECTED)
+        except ConnectionError:
+            self.sys_msg("send aborted: session ended", "red")
+            return
+        finally:
+            self.progress_done()
+            tmpdir.cleanup()
+        self.sys_msg("audio sent ✓", "green")
 
     async def prepare_video(self, src: Path, big: bool):
         """Probe and compress. Returns (payload_path, tmpdir) or None."""
@@ -939,6 +1081,68 @@ class Tor2App(ServerModeMixin, App):
 
     # ---------- input ----------
 
+    ALL_COMMANDS = [
+        "/help", "/nick", "/update", "/disconnect", "/settings", "/quit",
+        "/code", "/join", "/connect", "/accept", "/reject", "/add",
+        "/contacts", "/delcontact", "/joinserver", "/server",
+        "/ch", "/channels", "/members", "/more", "/del", "/leave",
+        "/img", "/vid", "/big-vid", "/audio", "/get", "/save", "/play",
+        "/mkchan", "/rmchan", "/kick", "/ban", "/unban", "/bans",
+        "/promote", "/demote", "/newinvite", "/autoupdate",
+    ]
+
+    def completions(self, text: str) -> list[str]:
+        """Candidates for tab completion of the current input."""
+        if not text or text.endswith(" "):
+            head, frag = text, ""
+        else:
+            head, _, frag = text.rpartition(" ")
+            head = head + " " if head else ""
+        if not head and text.startswith("/"):
+            return [c for c in self.ALL_COMMANDS if c.startswith(text)]
+        pool: list[str] = []
+        if self.conv.kind == "server" and self.srv:
+            cmd = text.split(" ")[0]
+            if cmd in ("/ch", "/channel", "/mkchan", "/rmchan"):
+                pool = list(self.srv.get("channels", []))
+                pool += ["#" + c for c in self.srv.get("channels", [])]
+            else:
+                pool = list(self.srv.get("online", []))
+                pool += ["@" + n for n in self.srv.get("online", [])]
+                pool += list(self.srv.get("channels", []))
+        else:
+            pool = list(store.load_contacts()) + list(store.load_servers())
+        if not frag:
+            return [head + p for p in pool]
+        low = frag.lower()
+        return [head + p for p in pool if p.lower().startswith(low)]
+
+    def on_key(self, event) -> None:
+        if event.key != "tab":
+            return
+        inp = self.query_one("#inputbar", Input)
+        if not self.focused or self.focused is not inp:
+            return
+        matches = self.completions(inp.value)
+        if not matches:
+            return
+        event.prevent_default()
+        event.stop()
+        if len(matches) == 1:
+            inp.value = matches[0] + " "
+        else:
+            # complete as far as they agree, then list the options
+            common = matches[0]
+            for m in matches[1:]:
+                while not m.startswith(common):
+                    common = common[:-1]
+            if len(common) > len(inp.value):
+                inp.value = common
+            else:
+                shown = " ".join(m.split(" ")[-1] for m in matches[:12])
+                self.sys_msg(shown + (" …" if len(matches) > 12 else ""))
+        inp.cursor_position = len(inp.value)
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         line = event.value.strip()
         event.input.value = ""
@@ -987,6 +1191,8 @@ class Tor2App(ServerModeMixin, App):
                 self.run_worker(self.send_video(arg), exclusive=False)
             case "/big-vid" | "/bigvid":
                 self.run_worker(self.send_video(arg, big=True), exclusive=False)
+            case "/audio" | "/mp3":
+                self.run_worker(self.send_audio(arg), exclusive=False)
             case "/add":
                 self.cmd_add(arg)
             case "/contacts":
@@ -1010,6 +1216,8 @@ class Tor2App(ServerModeMixin, App):
                 self.manual_disconnect = True
                 await self.drop_session()
                 self.sys_msg("disconnected")
+            case "/settings" | "/config":
+                self.push_screen(settings.SettingsScreen())
             case "/help":
                 for line_ in (
                     "/code                       — get a 5-digit pairing code to share",
@@ -1020,9 +1228,11 @@ class Tor2App(ServerModeMixin, App):
                     "/save [id] · /play [id]     — keep or replay a previewed image",
                     "/vid <path>                 — send a video (auto-compressed, ≤10 min)",
                     "/big-vid <path>             — send a long video (any length, ≤3 GB)",
+                    "/audio <path>               — send music or audio (mp3, ≤200 MB)",
                     "/add <name> [onion]         — save a contact (defaults to current peer)",
                     "/contacts · /delcontact <name>",
                     "/nick <name>                — set your display name (persists)",
+                    "/settings                   — notifications, theme, quality…",
                     "/update                     — get the latest version from github",
                     "/disconnect · ctrl+q",
                     "— servers —",
@@ -1051,6 +1261,8 @@ class Tor2App(ServerModeMixin, App):
             case "/big-vid" | "/bigvid":
                 self.run_worker(self.server_send_media(arg, "vid", big=True),
                                 exclusive=False)
+            case "/audio" | "/mp3":
+                self.run_worker(self.server_send_media(arg, "aud"), exclusive=False)
             case "/get":
                 await self.server_fetch(arg)
             case "/more":
@@ -1072,6 +1284,8 @@ class Tor2App(ServerModeMixin, App):
                 await self.drop_session()
                 if name and store.remove_server(name):
                     self.sys_msg(f"left and forgot server “{name}”")
+            case "/settings" | "/config":
+                self.push_screen(settings.SettingsScreen())
             case "/help":
                 for line_ in (
                     f"— server “{self.srv['name']}” —",
@@ -1081,6 +1295,7 @@ class Tor2App(ServerModeMixin, App):
                     "/img <path>        — post an image (shown inline to everyone)",
                     "/vid <path>        — post a video (others download with /get)",
                     "/big-vid <path>    — post a long video (any length, ≤3 GB)",
+                    "/audio <path>      — post music or audio (mp3, ≤200 MB)",
                     "/get <id>          — download a posted image or video",
                     "/more              — load older messages",
                     "/del <id>          — delete your message (admins: any)",
