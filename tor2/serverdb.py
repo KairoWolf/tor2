@@ -4,6 +4,7 @@ Secrets (member tokens, invite codes) are only ever stored as SHA-256 hashes,
 so a stolen database does not let anyone authenticate as an existing member.
 """
 
+import base64
 import hashlib
 import os
 import re
@@ -38,7 +39,8 @@ CREATE TABLE IF NOT EXISTS media(
     size INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
     path TEXT NOT NULL,
-    created REAL NOT NULL);
+    created REAL NOT NULL,
+    thumb BLOB);
 CREATE TABLE IF NOT EXISTS messages(
     id INTEGER PRIMARY KEY,
     channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
@@ -81,9 +83,16 @@ class ServerDB:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
         if not self.channels():
             self.create_channel("general")
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was first created."""
+        have = {r["name"] for r in self.db.execute("PRAGMA table_info(media)")}
+        if "thumb" not in have:
+            self.db.execute("ALTER TABLE media ADD COLUMN thumb BLOB")
 
     # ---------- meta ----------
 
@@ -268,6 +277,12 @@ class ServerDB:
         self._evict_media()
         return mid
 
+    def set_thumb(self, media_id: int, thumb: bytes | None) -> None:
+        if thumb:
+            self.db.execute("UPDATE media SET thumb=? WHERE id=?",
+                            (thumb, media_id))
+            self.db.commit()
+
     def add_media_file(self, kind: str, ext: str, sink) -> int:
         """Adopt a completed :class:`~tor2.media.ChunkSink` without reading it.
 
@@ -299,8 +314,11 @@ class ServerDB:
         r = self.db.execute("SELECT * FROM media WHERE id=?", (media_id,)).fetchone()
         if r is None:
             return None
-        return {"id": r["id"], "kind": r["kind"], "ext": r["ext"],
+        info = {"id": r["id"], "kind": r["kind"], "ext": r["ext"],
                 "size": r["size"], "sha256": r["sha256"]}
+        if r["thumb"]:
+            info["thumb"] = base64.b64encode(r["thumb"]).decode()
+        return info
 
     def media_bytes(self, media_id: int) -> bytes | None:
         r = self.db.execute("SELECT path FROM media WHERE id=?", (media_id,)).fetchone()

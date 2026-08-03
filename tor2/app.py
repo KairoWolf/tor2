@@ -69,6 +69,13 @@ class Tor2App(ServerModeMixin, App):
         dock: bottom;
         border: round $accent;
     }
+    #progress {
+        dock: bottom;
+        height: 1;
+        padding: 0 1;
+        color: $success;
+        display: none;
+    }
     #preview {
         dock: bottom;
         height: auto;
@@ -115,6 +122,7 @@ class Tor2App(ServerModeMixin, App):
                 yield Static(id="onlinelist")
             yield RichLog(id="chat", wrap=True, markup=False)
         yield Static(id="preview")
+        yield Static(id="progress")
         yield Input(placeholder="message…  (/help for commands)", id="inputbar")
 
     # ---------- helpers ----------
@@ -130,6 +138,23 @@ class Tor2App(ServerModeMixin, App):
 
     def sys_msg(self, msg: str, style: str = "bright_black") -> None:
         self.chat.write(Text(f"  • {msg}", style=style))
+
+    # ---------- progress ----------
+
+    def progress(self, label: str, fraction: float) -> None:
+        """Show a labelled bar above the input bar. fraction >= 1 finishes it."""
+        bar = self.query_one("#progress", Static)
+        if fraction >= 1.0:
+            bar.display = False
+            return
+        width = 28
+        filled = max(0, min(width, round(fraction * width)))
+        meter = "█" * filled + "░" * (width - filled)
+        bar.update(f"{label} ▕{meter}▏ {fraction * 100:3.0f}%")
+        bar.display = True
+
+    def progress_done(self) -> None:
+        self.query_one("#progress", Static).display = False
 
     # ---------- previews ----------
 
@@ -562,11 +587,12 @@ class Tor2App(ServerModeMixin, App):
             self.sys_msg(f"rejected video: {e}", "red")
             self.set_status(f"connected to “{self.peer_nick}” ✓")
             return
-        self.set_status(f"receiving video from “{self.peer_nick}”… {sink.progress}%")
+        self.progress(f"receiving from {self.peer_nick}", sink.got / sink.size)
         if not sink.complete:
             return
 
         self._incoming_video = None
+        self.progress_done()
         dest = self._next_received("vid", "mp4")
         try:
             await asyncio.to_thread(sink.finish, dest)
@@ -587,6 +613,7 @@ class Tor2App(ServerModeMixin, App):
                          "it decodes as video", "yellow")
         self.sys_msg(f"{self.peer_nick} sent a video ({fmt_size(sink.size)}) → {dest}",
                      "magenta")
+        await self.preview_video(dest)
         self.set_status(f"connected to “{self.peer_nick}” ✓")
 
     @staticmethod
@@ -655,17 +682,28 @@ class Tor2App(ServerModeMixin, App):
             await media.send_file(
                 self.session, payload, {"t": "vmeta"}, "vchunk",
                 proto.chunk_size_for(size), sha,
-                on_progress=lambda sent, total: self.set_status(
-                    f"sending video… {sent * 100 // total}%"),
+                on_progress=lambda sent, total: self.progress(
+                    "sending video", sent / total),
                 keep_going=lambda: self.state == CONNECTED)
         except ConnectionError:
             self.sys_msg("video send aborted: session ended", "red")
             return
         finally:
+            self.progress_done()
             tmpdir.cleanup()
             if self.state == CONNECTED:
                 self.set_status(f"connected to “{self.peer_nick}” ✓")
         self.sys_msg("video sent ✓", "green")
+
+    async def preview_video(self, path: Path) -> None:
+        """Show a still from a video file, so you can see what arrived."""
+        thumb = await asyncio.to_thread(video.thumbnail, path)
+        if not thumb:
+            return
+        try:
+            self.chat.write(render_preview(thumb, width=44))
+        except Exception:
+            pass
 
     async def prepare_video(self, src: Path, big: bool):
         """Probe and compress. Returns (payload_path, tmpdir) or None."""
@@ -685,15 +723,21 @@ class Tor2App(ServerModeMixin, App):
         mins = info["duration"] / 60
         self.sys_msg(f"compressing {src.name} ({mins:.1f} min)"
                      + (" — this can take a while for long videos…" if big else "…"))
-        self.set_status("compressing video…")
         tmpdir = tempfile.TemporaryDirectory(prefix="tor2vid-")
         out = Path(tmpdir.name) / "out.mp4"
+
+        def on_progress(fraction: float) -> None:
+            self.call_from_thread(self.progress, "compressing", fraction)
+
         try:
-            await asyncio.to_thread(video.compress, src, out)
+            await asyncio.to_thread(video.compress, src, out, on_progress,
+                                    info["duration"])
         except Exception as e:
+            self.progress_done()
             self.sys_msg(str(e), "red")
             tmpdir.cleanup()
             return None
+        self.progress_done()
 
         size = out.stat().st_size
         cap = proto.MAX_BIG_VIDEO_BYTES if big else proto.MAX_VIDEO_BYTES
@@ -703,6 +747,9 @@ class Tor2App(ServerModeMixin, App):
                 f"{fmt_size(cap)} limit", "red")
             tmpdir.cleanup()
             return None
+        saved = 100 - round(size * 100 / max(1, src.stat().st_size))
+        self.sys_msg(f"compressed {fmt_size(src.stat().st_size)} → "
+                     f"{fmt_size(size)} ({saved}% smaller)", "green")
         return out, tmpdir
 
     # ---------- input ----------

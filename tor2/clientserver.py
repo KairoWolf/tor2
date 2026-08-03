@@ -201,8 +201,25 @@ class ServerModeMixin:
             inline = msg.get("inline")
             if inline:
                 self.render_inline_image(msg, inline)
+            else:
+                self.render_thumb(msg.get("media"))
         elif str(msg.get("nick")) != self.nick:
             self.sys_msg(f"new message in #{chan}", "bright_black")
+
+    def render_thumb(self, info: dict | None) -> None:
+        """Preview a video from the small thumbnail its sender attached, so
+        members see what it is before spending minutes downloading it."""
+        if not info or info.get("kind") != "vid" or not info.get("thumb"):
+            return
+        try:
+            data = base64.b64decode(info["thumb"], validate=True)
+            validate_image(data)
+        except Exception:
+            return
+        try:
+            self.chat.write(render_preview(data, width=44))
+        except Exception:
+            pass
 
     def render_event(self, m: dict, historic: bool = False) -> Text:
         ts = time.strftime("%H:%M", time.localtime(m.get("ts", time.time())))
@@ -276,11 +293,12 @@ class ServerModeMixin:
             self.sys_msg(f"download failed: {e}", "red")
             self.update_server_status()
             return
-        self.update_server_status(f"downloading {sink.progress}%")
+        self.progress("downloading", sink.got / sink.size)
         if not sink.complete:
             return
 
         self.srv["download"] = None
+        self.progress_done()
         dest = self._next_received("img" if dl["kind"] == "img" else "vid", dl["ext"])
         try:
             await asyncio.to_thread(sink.finish, dest)
@@ -304,6 +322,8 @@ class ServerModeMixin:
                 self.show_preview(data)
             except Exception:
                 pass
+        else:
+            await self.preview_video(dest)
         self.update_server_status()
 
     # ---------- outgoing ----------
@@ -347,6 +367,7 @@ class ServerModeMixin:
         if not path.is_file():
             self.sys_msg(f"no such file: {path}", "red")
             return
+        thumb = None
         if kind == "img":
             blob = path.read_bytes()
             if len(blob) > proto.MAX_IMAGE_BYTES:
@@ -368,6 +389,7 @@ class ServerModeMixin:
                 return
             payload, tmpdir = prepared
             ext = "mp4"
+            thumb = await asyncio.to_thread(video.thumbnail, payload)
 
         try:
             if self.state != SERVER or self.session is None:
@@ -379,15 +401,17 @@ class ServerModeMixin:
             sha = await asyncio.to_thread(media.sha256_file, payload)
             await media.send_file(
                 self.session, payload,
-                {"t": "mput", "kind": kind, "ext": ext, "chan": self.srv["channel"]},
+                {"t": "mput", "kind": kind, "ext": ext, "chan": self.srv["channel"],
+                 "thumb": base64.b64encode(thumb).decode() if thumb else None},
                 "mchunk", proto.chunk_size_for(size), sha,
-                on_progress=lambda sent, total: self.update_server_status(
-                    f"uploading {sent * 100 // total}%"),
+                on_progress=lambda sent, total: self.progress(
+                    "uploading", sent / total),
                 keep_going=lambda: self.state == SERVER)
         except ConnectionError:
             self.sys_msg("upload aborted: session ended", "red")
             return
         finally:
+            self.progress_done()
             if tmpdir is not None:
                 tmpdir.cleanup()
             self.update_server_status()

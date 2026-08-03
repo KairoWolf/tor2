@@ -19,7 +19,7 @@ import signal
 import sys
 from pathlib import Path
 
-from . import media, proto, updater
+from . import media, proto, updater, video
 from .serverdb import ServerDB
 from .tornet import TorNet
 
@@ -292,7 +292,17 @@ class Tor2Server:
             c.upload["sink"].abort()
         sink = media.ChunkSink(size, chunks, str(msg.get("sha256", ""))[:64],
                                ext=ext, tmp_dir=self.db.media_dir)
-        c.upload = {"kind": kind, "ext": ext, "chan": chan, "sink": sink}
+        thumb = None
+        raw = msg.get("thumb")
+        if raw:
+            try:
+                thumb = base64.b64decode(raw, validate=True)
+                if len(thumb) > video.MAX_THUMB_BYTES:
+                    thumb = None
+            except (binascii.Error, ValueError):
+                thumb = None
+        c.upload = {"kind": kind, "ext": ext, "chan": chan, "sink": sink,
+                    "thumb": thumb}
         if size > proto.MAX_VIDEO_BYTES:
             log.info("%s uploading %s (%.1f MB)", c.nick, ext, size / 1024 / 1024)
 
@@ -334,6 +344,8 @@ class Tor2Server:
         except ValueError as e:
             c.enqueue({"t": "srverr", "msg": f"upload rejected: {e}"})
             return
+        if up.get("thumb"):
+            self.db.set_thumb(mid, up["thumb"])
         stored = self.db.add_message(up["chan"], c.member_id, c.nick, None, mid)
         # Images are small enough to push to everyone; videos are announced and
         # fetched on demand so one upload doesn't flood every Tor circuit.
