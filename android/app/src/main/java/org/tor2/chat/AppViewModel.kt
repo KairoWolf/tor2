@@ -166,10 +166,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun leave(saved: SavedServer) {
-        current.value?.disconnect()
-        current.value = null
+        if (current.value?.saved?.key == saved.key) {
+            current.value?.disconnect()
+            current.value = null
+        }
         store.removeServer(saved.key)
         savedServers.value = store.servers()
+        banner.value = "Left ${saved.displayName}"
+        // show whatever is left, so the screen is never blank for no reason
+        savedServers.value.firstOrNull()?.let { open(it) }
     }
 
     fun send(text: String) {

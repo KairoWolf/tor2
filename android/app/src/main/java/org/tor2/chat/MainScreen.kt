@@ -5,6 +5,7 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,6 +42,7 @@ fun MainScreen(vm: AppViewModel) {
     var showSettings by remember { mutableStateOf(false) }
     var showMembers by remember { mutableStateOf(false) }
     var showStartChat by remember { mutableStateOf(false) }
+    var infoFor by remember { mutableStateOf<SavedServer?>(null) }
     val openChat by vm.openChat.collectAsState()
     val incoming by vm.incomingRequest.collectAsState()
 
@@ -56,6 +58,7 @@ fun MainScreen(vm: AppViewModel) {
                         onJoin = { showJoin = true },
                         onStartChat = { showStartChat = true },
                         onSettings = { showSettings = true },
+                        onInfo = { infoFor = it },
                         onPicked = { scope.launch { drawer.close() } },
                     )
                 },
@@ -101,6 +104,12 @@ fun MainScreen(vm: AppViewModel) {
 
     if (showJoin) JoinSheet(vm) { showJoin = false }
     if (showStartChat) StartChatSheet(vm) { showStartChat = false }
+    infoFor?.let { saved ->
+        ServerInfoSheet(vm, saved,
+                        client.takeIf { it?.saved?.key == saved.key }) {
+            infoFor = null
+        }
+    }
     incoming?.let {
         IncomingRequestDialog(it, onAccept = { vm.acceptIncoming() },
                               onReject = { vm.rejectIncoming() })
@@ -197,8 +206,8 @@ private fun NoServerYet(onJoin: () -> Unit, onStartChat: () -> Unit,
 /** Servers down the side, channels underneath the active one. */
 @Composable
 private fun ServerDrawer(vm: AppViewModel, onJoin: () -> Unit,
-                         onStartChat: () -> Unit,
-                         onSettings: () -> Unit, onPicked: () -> Unit) {
+                         onStartChat: () -> Unit, onSettings: () -> Unit,
+                         onInfo: (SavedServer) -> Unit, onPicked: () -> Unit) {
     val servers by vm.savedServers.collectAsState()
     val client by vm.current.collectAsState()
     val nick by vm.nick.collectAsState()
@@ -227,7 +236,8 @@ private fun ServerDrawer(vm: AppViewModel, onJoin: () -> Unit,
                 item { DrawerLabel("Servers") }
                 items(servers, key = { it.key }) { s ->
                     val isActive = client?.saved?.key == s.key
-                    ServerRow(s, isActive) { vm.open(s); onPicked() }
+                    ServerRow(s, isActive, onClick = { vm.open(s); onPicked() },
+                              onLongClick = { onInfo(s) })
                     AnimatedVisibility(
                         visible = isActive,
                         enter = expandVertically(spring(Spring.DampingRatioMediumBouncy)) + fadeIn(),
@@ -272,14 +282,17 @@ private fun DrawerLabel(text: String) {
          color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun ServerRow(s: SavedServer, active: Boolean, onClick: () -> Unit) {
+private fun ServerRow(s: SavedServer, active: Boolean, onClick: () -> Unit,
+                      onLongClick: () -> Unit) {
     val bg by animateColorAsState(
         if (active) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
         tween(220), label = "srv")
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp)
-            .clip(RoundedCornerShape(12.dp)).background(bg).clickable(onClick = onClick)
+            .clip(RoundedCornerShape(12.dp)).background(bg)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -296,8 +309,13 @@ private fun ServerRow(s: SavedServer, active: Boolean, onClick: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Text(s.displayName, style = MaterialTheme.typography.titleMedium,
                  maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(s.onion.take(16) + "…", style = MaterialTheme.typography.labelSmall,
+            Text("hold for address and settings",
+                 style = MaterialTheme.typography.labelSmall,
                  color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        IconButton(onClick = onLongClick, modifier = Modifier.size(30.dp)) {
+            Icon(Icons.Default.MoreVert, "server options",
+                 tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

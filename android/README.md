@@ -89,6 +89,15 @@ Videos are sent as they are — the phone does not re-encode them, so a large
 recording stays large. Trim or compress long videos before sending, or send
 them from the desktop client, which does re-encode.
 
+## Managing a server
+
+**Hold** a server in the drawer (or tap the ⋮ next to it) for its details:
+its onion address with copy and share buttons, who is online, and **Leave
+this server**, which asks before removing it and its saved membership.
+
+That is also where to find the address when someone asks you for it, rather
+than having to go back to whoever set the server up.
+
 ## What is not on mobile yet
 
 - Multi-circuit parallel transfers are implemented (`Parallel.kt`, tested) but
