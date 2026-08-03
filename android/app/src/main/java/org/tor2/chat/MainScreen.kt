@@ -65,7 +65,14 @@ fun MainScreen(vm: AppViewModel) {
                     )
                 },
             ) {
-                Scaffold { padding ->
+                val snackbar = remember { SnackbarHostState() }
+                LaunchedEffect(banner) {
+                    banner?.let {
+                        snackbar.showSnackbar(it)
+                        vm.banner.value = null
+                    }
+                }
+                Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
                     Box(Modifier.padding(padding)) {
                         val c = client
                         val dm = openChat

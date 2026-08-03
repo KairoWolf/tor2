@@ -1,7 +1,5 @@
 package org.tor2.chat
 
-import com.sun.jna.Library
-import com.sun.jna.Native
 import java.security.MessageDigest
 
 /**
@@ -16,19 +14,6 @@ object Codes {
     const val SERVER_PERSON = "tor2-server-join-v1"
     const val CHAT_PERSON = "tor2-rendezvous-v1"
 
-    /**
-     * lazysodium does not expose this one call, and it is the step that turns
-     * an expanded key into the public key an onion address is built from —
-     * exactly what tor itself does, and what the desktop client uses.
-     */
-    private interface SodiumExtra : Library {
-        fun crypto_scalarmult_ed25519_base_noclamp(q: ByteArray, n: ByteArray): Int
-    }
-
-    private val extra: SodiumExtra by lazy {
-        Native.load("sodium", SodiumExtra::class.java)
-    }
-
     /** (expanded 64-byte secret for tor, 32-byte public key) */
     fun keyFor(code: String, person: String): Pair<ByteArray, ByteArray> {
         val seed = Crypto.blake2bPersonalRaw("$person:$code".toByteArray())
@@ -36,9 +21,7 @@ object Codes {
         h[0] = (h[0].toInt() and 248).toByte()
         h[31] = (h[31].toInt() and 127).toByte()
         h[31] = (h[31].toInt() or 64).toByte()
-        val pub = ByteArray(32)
-        val rc = extra.crypto_scalarmult_ed25519_base_noclamp(pub, h.copyOfRange(0, 32))
-        check(rc == 0) { "could not derive the address for that code" }
+        val pub = Ed25519.publicKeyNoClamp(h)
         return h to pub
     }
 

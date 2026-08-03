@@ -170,11 +170,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             banner.value = "A server code is 8 digits"
             return
         }
-        val onion = runCatching { Codes.serverAddress(digits) }.getOrNull()
+        val derived = runCatching { Codes.serverAddress(digits) }
+        val onion = derived.getOrNull()
         if (onion == null) {
-            banner.value = "Could not work out an address for that code"
+            val why = derived.exceptionOrNull()
+            android.util.Log.e("tor2", "could not derive address for $digits", why)
+            banner.value = "Could not work out an address for that code" +
+                    (why?.message?.let { ": $it" } ?: "")
             return
         }
+        android.util.Log.i("tor2", "code $digits -> ${onion.take(16)}…")
         val key = label.ifBlank { "server-$digits" }
         val saved = SavedServer(key, onion, "", label.ifBlank { "Server $digits" })
         store.saveServer(saved)
