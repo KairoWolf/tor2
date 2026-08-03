@@ -156,7 +156,18 @@ never changes.
 
 ### Invite people
 
-**The easy way — an 8-digit join code.** As an admin inside tor2:
+**The easy way — an 8-digit join code.**
+
+On the server machine, at any time:
+
+```sh
+tor2-server ~/.local/share/tor2-server --joincode           # one use, 24h
+tor2-server ~/.local/share/tor2-server --joincode 5 --hours 12
+tor2-server ~/.local/share/tor2-server --joincode --admin
+```
+
+A running server picks up a code minted this way within a minute. Or, as an
+admin inside tor2 while connected to the server:
 
 ```
 /joincode                one code, one use, valid a day

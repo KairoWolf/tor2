@@ -1351,9 +1351,13 @@ class Tor2App(ServerModeMixin, App):
             case _:
                 if cmd in self.SERVER_ONLY:
                     where = ("a direct chat" if self.conv.kind == "dm"
-                             else "no conversation")
-                    self.sys_msg(f"{cmd} only works on a server — you are in "
-                                 f"{where}", "red")
+                             else "not connected to one")
+                    self.sys_msg(f"{cmd} needs a server — you are {where}. "
+                                 f"Use /server <name> to connect first.", "red")
+                    if cmd == "/joincode":
+                        self.sys_msg("on the server machine you can also run: "
+                                     "tor2-server <data-dir> --joincode",
+                                     "bright_black")
                 else:
                     self.sys_msg(f"unknown command: {cmd} (try /help)", "red")
 

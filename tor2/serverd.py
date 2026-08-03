@@ -138,6 +138,7 @@ class Tor2Server:
         self.local_port = port
         await self.publish_join_codes()
         asyncio.create_task(self.update_loop())
+        asyncio.create_task(self.watch_join_codes())
         async with server:
             await server.serve_forever()
 
@@ -691,6 +692,20 @@ class Tor2Server:
         if self.main_task is not None:   # stops serve_forever; main() then exits
             self.main_task.cancel()
 
+    async def watch_join_codes(self) -> None:
+        """Publish codes minted elsewhere — the command line, or another
+        admin — without needing a restart."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                live = {e["code"] for e in self.db.active_join_codes()}
+                for code in live - set(self.published_codes):
+                    await self.publish_one_code(code)
+                for code in set(self.published_codes) - live:
+                    await self.unpublish_code(code)
+            except Exception as e:
+                log.debug("join code sweep failed: %s", e)
+
     async def update_loop(self) -> None:
         """Check daily while auto-update is enabled."""
         while True:
@@ -881,6 +896,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="print a fresh one-use invite code and exit")
     ap.add_argument("--admin-invite", action="store_true",
                     help="print a fresh one-use ADMIN invite code and exit")
+    ap.add_argument("--joincode", nargs="?", const="1", metavar="USES",
+                    help="print a fresh 8-digit join code (address included) "
+                         "and exit; optionally how many uses")
+    ap.add_argument("--admin", action="store_true",
+                    help="with --joincode: whoever uses it becomes an admin")
+    ap.add_argument("--hours", type=int, default=24,
+                    help="with --joincode: how long it stays valid (default 24)")
     ap.add_argument("--address", action="store_true",
                     help="print this server's onion address and exit")
     ap.add_argument("--info", action="store_true",
@@ -900,6 +922,24 @@ def main(argv: list[str] | None = None) -> int:
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     data_dir.chmod(0o700)
+
+    if args.joincode is not None:
+        db = ServerDB(data_dir, vault=atrest.Vault(
+            atrest.load_key(data_dir, passphrase)))
+        try:
+            uses = max(1, min(100, int(args.joincode)))
+        except ValueError:
+            uses = 1
+        code = db.create_join_code(uses=uses, is_admin=args.admin,
+                                    ttl_seconds=args.hours * 3600)
+        db.close()
+        print(code)
+        print(f"They type just these digits — no address needed. "
+              f"{uses} use{'s' if uses != 1 else ''}, valid {args.hours}h.",
+              file=sys.stderr)
+        print("A running server picks it up within a minute; otherwise it goes "
+              "live at next start.", file=sys.stderr)
+        return 0
 
     if args.invite or args.admin_invite:
         db = ServerDB(data_dir, vault=atrest.Vault(
