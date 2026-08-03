@@ -17,6 +17,7 @@ from textual.widgets import Input, RichLog, Static
 from . import media, proto, store, video
 from .app_consts import RECEIVED_DIR, fmt_size
 from .clientserver import SERVER, ChannelItem, ServerModeMixin
+from .conv import ConvItem, Conversation, LogProxy, current as current_conv
 from .imgview import is_animated, render_frames, render_preview, validate_image
 from . import updater
 from .tornet import TorNet, code_to_key, normalize_onion, onion_from_pub
@@ -47,7 +48,16 @@ class Tor2App(ServerModeMixin, App):
         border-right: solid $primary-darken-1;
         display: none;
     }
-    #srvname { padding: 0 1; text-style: bold; }
+    #convhdr { padding: 0 1; color: $text-muted; text-style: bold; }
+    #convlist { height: auto; }
+    #chanbox { height: auto; display: none; }
+    .conv {
+        padding: 0 1;
+        color: $text-muted;
+    }
+    .conv:hover { background: $boost; }
+    .conv.-active { background: $primary; color: $text; text-style: bold; }
+    #srvname { padding: 1 1 0 1; text-style: bold; }
     #chanlist { height: auto; }
     #onlinelist { padding: 1 1 0 1; }
     .chan {
@@ -90,6 +100,8 @@ class Tor2App(ServerModeMixin, App):
         ("ctrl+q", "quit", "Quit"),
         ("up", "channel_prev", "Previous channel"),
         ("down", "channel_next", "Next channel"),
+        ("ctrl+n", "conv_next", "Next chat"),
+        ("ctrl+p", "conv_prev", "Previous chat"),
     ]
 
     def __init__(self):
@@ -97,20 +109,16 @@ class Tor2App(ServerModeMixin, App):
         cfg = store.load_config()
         self.nick = clean_nick(cfg.get("nick", "")) or getpass.getuser()
         self.tor = TorNet(Path.cwd() / ".tordata")
-        self.session: proto.Session | None = None
-        self.state = IDLE
-        self.peer_nick = "peer"
+        self.convs: dict[str, Conversation] = {}
+        self.active: Conversation | None = None
+        self.scratch = Conversation("_", "dm", "tor2")   # log before any session
         self.last_onion: str | None = None       # last address we dialed
         self._server: asyncio.Server | None = None
-        self._incoming_video: dict | None = None  # in-progress receive
         self.pairing_code: str | None = None
         self._code_timer = None
-        self.srv: dict = {}
         self.cache = media.MediaCache()
         self._anim_timer = None
         self._anim: dict | None = None
-        self.last_rx = 0.0
-        self.manual_disconnect = False
 
     # ---------- layout ----------
 
@@ -118,19 +126,190 @@ class Tor2App(ServerModeMixin, App):
         yield Static(" tor2 · starting…", id="status")
         with Horizontal():
             with Vertical(id="sidebar"):
-                yield Static(id="srvname")
-                yield Vertical(id="chanlist")
-                yield Static(id="onlinelist")
+                yield Static("chats", id="convhdr")
+                yield Vertical(id="convlist")
+                with Vertical(id="chanbox"):
+                    yield Static(id="srvname")
+                    yield Vertical(id="chanlist")
+                    yield Static(id="onlinelist")
             yield RichLog(id="chat", wrap=True, markup=False)
         yield Static(id="preview")
         yield Static(id="progress")
         yield Input(placeholder="message…  (/help for commands)", id="inputbar")
 
-    # ---------- helpers ----------
+    # ---------- conversation plumbing ----------
+    #
+    # Handlers are shared by foreground and background conversations. Each
+    # receive loop marks its conversation in a context variable, so these
+    # properties resolve to the right one without every handler taking an
+    # extra argument.
 
     @property
-    def chat(self) -> RichLog:
+    def conv(self) -> Conversation:
+        return current_conv.get() or self.active or self.scratch
+
+    @property
+    def raw_log(self) -> RichLog:
         return self.query_one("#chat", RichLog)
+
+    @property
+    def chat(self) -> LogProxy:
+        return LogProxy(self, self.conv)
+
+    @property
+    def session(self):
+        return self.conv.session
+
+    @session.setter
+    def session(self, value):
+        self.conv.session = value
+
+    @property
+    def state(self) -> str:
+        return self.conv.state
+
+    @state.setter
+    def state(self, value: str) -> None:
+        self.conv.state = value
+
+    @property
+    def peer_nick(self) -> str:
+        return self.conv.peer_nick
+
+    @peer_nick.setter
+    def peer_nick(self, value: str) -> None:
+        self.conv.peer_nick = value
+
+    @property
+    def srv(self) -> dict:
+        return self.conv.srv
+
+    @srv.setter
+    def srv(self, value: dict) -> None:
+        self.conv.srv = value
+
+    @property
+    def last_rx(self) -> float:
+        return self.conv.last_rx
+
+    @last_rx.setter
+    def last_rx(self, value: float) -> None:
+        self.conv.last_rx = value
+
+    @property
+    def manual_disconnect(self) -> bool:
+        return self.conv.manual_disconnect
+
+    @manual_disconnect.setter
+    def manual_disconnect(self, value: bool) -> None:
+        self.conv.manual_disconnect = value
+
+    @property
+    def _incoming_video(self):
+        return self.conv.incoming_video
+
+    @_incoming_video.setter
+    def _incoming_video(self, value) -> None:
+        self.conv.incoming_video = value
+
+    # ---------- conversations ----------
+
+    def add_conv(self, key: str, kind: str, title: str, session) -> Conversation:
+        """Register a new live conversation and show it."""
+        conv = Conversation(key, kind, title, session)
+        self.convs[key] = conv
+        self.select_conv(conv)
+        return conv
+
+    def select_conv(self, conv: Conversation | None) -> None:
+        if conv is not None and conv.key not in self.convs:
+            return
+        self.active = conv
+        if conv is not None:
+            conv.unread = 0
+            conv.mentioned = False
+        self.raw_log.clear()
+        for line in (conv.lines if conv else self.scratch.lines):
+            self.raw_log.write(line)
+        self.refresh_convs()
+        self.refresh_view()
+
+    def refresh_view(self) -> None:
+        """Repaint the parts of the chrome that depend on which conversation
+        is on screen."""
+        conv = self.active
+        if conv is None:
+            self.show_sidebar(bool(self.convs))
+            self.set_status("not connected")
+            return
+        token = current_conv.set(conv)
+        try:
+            if conv.kind == "server" and conv.srv.get("channel"):
+                self.show_sidebar(True)
+                self.refresh_sidebar()
+                self.update_server_status()
+            else:
+                self.show_channel_list(False)
+                self.show_sidebar(bool(self.convs))
+                if conv.state == CONNECTED:
+                    self.set_status(f"connected to “{conv.peer_nick}” ✓")
+                elif conv.state == PENDING_IN:
+                    self.set_status(f"incoming request from “{conv.peer_nick}”")
+                elif conv.state == PENDING_OUT:
+                    self.set_status("waiting for peer to accept…")
+                else:
+                    self.set_status("not connected")
+        finally:
+            current_conv.reset(token)
+
+    def bump_unread(self, conv: Conversation, mentioned: bool = False) -> None:
+        if conv is self.active:
+            return
+        conv.unread += 1
+        conv.mentioned = conv.mentioned or mentioned
+        self.refresh_convs()
+
+    def refresh_convs(self) -> None:
+        """Rebuild the conversation list at the top of the sidebar."""
+        listed = [w.conv_key for w in self.query(ConvItem)]
+        if listed != list(self.convs):
+            self.run_worker(self.rebuild_conv_items(), group="sidebar-convs",
+                            exclusive=True)
+        else:
+            for w in self.query(ConvItem):
+                c = self.convs.get(w.conv_key)
+                if c:
+                    w.set_class(c is self.active, "-active")
+                    w.update(c.sidebar_row(c is self.active))
+        self.show_sidebar(bool(self.convs))
+
+    async def rebuild_conv_items(self) -> None:
+        box = self.query_one("#convlist")
+        await box.remove_children()
+        await box.mount_all([ConvItem(c) for c in self.convs.values()])
+        for w in self.query(ConvItem):
+            c = self.convs.get(w.conv_key)
+            if c:
+                w.set_class(c is self.active, "-active")
+
+    def cycle_conv(self, delta: int) -> None:
+        keys = list(self.convs)
+        if len(keys) < 2 or self.active is None:
+            return
+        i = keys.index(self.active.key) if self.active.key in keys else 0
+        self.select_conv(self.convs[keys[(i + delta) % len(keys)]])
+
+    def close_conv(self, conv: Conversation) -> None:
+        self.convs.pop(conv.key, None)
+        if self.active is conv:
+            self.select_conv(next(iter(self.convs.values()), None))
+        else:
+            self.refresh_convs()
+
+    def show_channel_list(self, visible: bool) -> None:
+        self.query_one("#chanbox").display = visible
+
+    # ---------- helpers ----------
 
     def set_status(self, right: str) -> None:
         addr = self.tor.onion_addr or "starting…"
@@ -241,7 +420,9 @@ class Tor2App(ServerModeMixin, App):
 
     # ---------- keepalive ----------
 
-    async def keepalive(self, session: proto.Session) -> None:
+    async def keepalive(self, session: proto.Session,
+                        conv: Conversation | None = None) -> None:
+        current_conv.set(conv)
         """Ping periodically and give up if the peer goes quiet.
 
         Without this an idle Tor stream can be dropped by a relay or NAT with
@@ -344,9 +525,6 @@ class Tor2App(ServerModeMixin, App):
     # ---------- connection handling ----------
 
     async def on_incoming(self, reader, writer) -> None:
-        if self.session is not None:
-            writer.close()
-            return
         try:
             session = await proto.handshake(reader, writer)
             hello = await asyncio.wait_for(session.recv(), timeout=60)
@@ -356,17 +534,20 @@ class Tor2App(ServerModeMixin, App):
             self.sys_msg(f"incoming connection failed handshake: {e}", "red")
             writer.close()
             return
-        if self.session is not None:
-            await session.close()
-            return
-        self.session = session
-        self.state = PENDING_IN
-        self.peer_nick = clean_nick(hello.get("nick", "")) or "peer"
-        self.set_status(f"incoming request from “{self.peer_nick}”")
-        self.sys_msg(f"incoming chat request from “{self.peer_nick}”", "yellow")
-        self.sys_msg(f"session fingerprint: {session.fingerprint}", "yellow")
-        self.sys_msg("type /accept to start chatting, or /reject to refuse", "yellow")
-        self.run_worker(self.recv_loop(session), group="net", exclusive=False)
+        nick = clean_nick(hello.get("nick", "")) or "peer"
+        conv = self.add_conv(f"dm:{nick}:{id(session)}", "dm", nick, session)
+        token = current_conv.set(conv)
+        try:
+            self.state = PENDING_IN
+            self.peer_nick = nick
+            self.sys_msg(f"incoming chat request from “{nick}”", "yellow")
+            self.sys_msg(f"session fingerprint: {session.fingerprint}", "yellow")
+            self.sys_msg("type /accept to start chatting, or /reject to refuse",
+                         "yellow")
+        finally:
+            current_conv.reset(token)
+        self.refresh_view()
+        self.run_worker(self.recv_loop(session, conv), group="net", exclusive=False)
 
     async def do_accept(self) -> None:
         if self.state != PENDING_IN or self.session is None:
@@ -384,9 +565,6 @@ class Tor2App(ServerModeMixin, App):
         await self.drop_session()
 
     async def do_connect(self, arg: str) -> None:
-        if self.session is not None:
-            self.sys_msg("already in a session — /disconnect first", "red")
-            return
         contacts = store.load_contacts()
         target, label = arg, arg
         if arg in contacts:
@@ -403,17 +581,19 @@ class Tor2App(ServerModeMixin, App):
         except Exception as e:
             self.sys_msg(f"connection failed: {e}", "red")
             return
-        if self.session is not None:
-            await session.close()
-            return
-        self.session = session
-        self.state = PENDING_OUT
-        self.last_onion = onion
-        await session.send({"t": "hello", "nick": self.nick})
-        self.set_status("waiting for peer to accept…")
-        self.sys_msg("connected — waiting for your peer to accept the chat")
-        self.sys_msg(f"session fingerprint: {session.fingerprint}", "green")
-        self.run_worker(self.recv_loop(session), group="net", exclusive=False)
+        title = arg if arg in contacts else onion[:10]
+        conv = self.add_conv(f"dm:{onion}", "dm", title, session)
+        token = current_conv.set(conv)
+        try:
+            self.state = PENDING_OUT
+            self.last_onion = onion
+            await session.send({"t": "hello", "nick": self.nick})
+            self.sys_msg("connected — waiting for your peer to accept the chat")
+            self.sys_msg(f"session fingerprint: {session.fingerprint}", "green")
+        finally:
+            current_conv.reset(token)
+        self.refresh_view()
+        self.run_worker(self.recv_loop(session, conv), group="net", exclusive=False)
 
     # ---------- pairing codes ----------
 
@@ -473,25 +653,27 @@ class Tor2App(ServerModeMixin, App):
             self.sys_msg(f"save this peer with: /add <name>", "bright_black")
 
     async def drop_session(self) -> None:
-        if self.session is not None:
-            await self.session.close()
-            self.session = None
-        was_server = self.state == SERVER
-        self.state = IDLE
-        self.peer_nick = "peer"
-        self._incoming_video = None
-        if was_server:
-            self.srv = {}
-            self.show_sidebar(False)
-            self.chat.clear()
-        if self.tor.onion_addr:
+        conv = self.conv
+        if conv.session is not None:
+            await conv.session.close()
+            conv.session = None
+        conv.state = IDLE
+        conv.peer_nick = "peer"
+        conv.incoming_video = None
+        conv.srv = {}
+        if conv.key in self.convs:
+            self.close_conv(conv)
+        elif self.tor.onion_addr:
             self.set_status("not connected")
 
     # ---------- receiving ----------
 
-    async def recv_loop(self, session: proto.Session) -> None:
+    async def recv_loop(self, session: proto.Session,
+                        conv: Conversation | None = None) -> None:
+        current_conv.set(conv)          # this task's conversation, for handlers
         self.touch_rx()
-        self.run_worker(self.keepalive(session), group="net", exclusive=False)
+        self.run_worker(self.keepalive(session, conv), group="net",
+                        exclusive=False)
         try:
             while True:
                 msg = await session.recv()
@@ -529,7 +711,9 @@ class Tor2App(ServerModeMixin, App):
         if self.state != CONNECTED:
             return  # nothing else is processed before the chat is accepted
         if kind == "txt":
-            self.chat_msg(self.peer_nick, str(msg.get("body", ""))[:10000], mine=False)
+            body = str(msg.get("body", ""))[:10000]
+            self.chat_msg(self.peer_nick, body, mine=False)
+            self.bump_unread(self.conv, self.mentions_me(body))
         elif kind == "img":
             self.handle_image(msg)
         elif kind == "vmeta":
@@ -942,6 +1126,12 @@ class Tor2App(ServerModeMixin, App):
             t.append(f"{name:<20}", style="bold cyan")
             t.append(onion, style="bright_black")
             self.chat.write(t)
+
+    def action_conv_next(self) -> None:
+        self.cycle_conv(1)
+
+    def action_conv_prev(self) -> None:
+        self.cycle_conv(-1)
 
     def action_channel_prev(self) -> None:
         self.cycle_channel(-1)

@@ -21,6 +21,7 @@ from .tornet import normalize_onion
 
 # imported lazily from app to avoid a circular import at module load
 from .app_consts import RECEIVED_DIR, fmt_size
+from .conv import current as current_conv
 
 SERVER = "server"
 HANDSHAKE_TIMEOUT = 60
@@ -92,10 +93,11 @@ class ServerModeMixin:
 
     async def _connect_server(self, onion: str, invite: str = "", token: str = "",
                               local_name: str = "", quiet: bool = False) -> None:
-        if self.session is not None:
-            self.sys_msg("already in a session — /disconnect first", "red")
+        existing = self.convs.get(f"srv:{onion}")
+        if existing is not None and existing.session is not None:
+            self.sys_msg("already connected to that server", "red")
+            self.select_conv(existing)
             return
-        self.manual_disconnect = False
         if not quiet:
             self.sys_msg(f"connecting to server {onion[:16]}… (can take ~15s)")
         try:
@@ -117,20 +119,29 @@ class ServerModeMixin:
             self.sys_msg("that address is a person, not a server — use /connect", "red")
             return
 
-        self.session = session
-        self.state = SERVER
-        self.srv = {
-            "onion": onion, "name": str(hello.get("name", "server"))[:40],
-            "local": local_name, "channel": "", "channels": [], "admin": False,
-            "online": [], "buffers": {}, "download": None,
-        }
-        await session.send({"t": "auth", "nick": self.nick,
-                            "invite": invite, "token": token})
-        self.run_worker(self.server_loop(session), group="net", exclusive=False)
+        name = str(hello.get("name", "server"))[:40]
+        conv = self.add_conv(f"srv:{onion}", "server", local_name or name, session)
+        conv.manual_disconnect = False
+        tok = current_conv.set(conv)
+        try:
+            self.state = SERVER
+            self.srv = {
+                "onion": onion, "name": name,
+                "local": local_name, "channel": "", "channels": [], "admin": False,
+                "online": [], "buffers": {}, "download": None,
+            }
+            await session.send({"t": "auth", "nick": self.nick,
+                                "invite": invite, "token": token})
+        finally:
+            current_conv.reset(tok)
+        self.run_worker(self.server_loop(session, conv), group="net",
+                        exclusive=False)
 
-    async def server_loop(self, session: proto.Session) -> None:
+    async def server_loop(self, session: proto.Session, conv=None) -> None:
+        current_conv.set(conv)          # this task's conversation, for handlers
         self.touch_rx()
-        self.run_worker(self.keepalive(session), group="net", exclusive=False)
+        self.run_worker(self.keepalive(session, conv), group="net",
+                        exclusive=False)
         lost = False
         try:
             while True:
@@ -153,7 +164,9 @@ class ServerModeMixin:
             if self.session is session:
                 entry = {"onion": self.srv.get("onion"),
                          "local": self.srv.get("local")}
+                manual = self.conv.manual_disconnect
                 await self.drop_session()
+                self.manual_disconnect = manual
                 # Tor circuits die routinely; get back on by ourselves rather
                 # than making the user retype /server.
                 if lost and entry["onion"] and not self.manual_disconnect:
@@ -229,9 +242,12 @@ class ServerModeMixin:
                          "green")
         self.sys_msg("note: a server operator can read channel messages "
                      "(DMs stay end-to-end)", "bright_black")
-        self.show_sidebar(True)
-        self.refresh_sidebar()
-        self.update_server_status()
+        self.conv.title = local or s["name"]
+        self.refresh_convs()
+        if self.conv is self.active:
+            self.show_sidebar(True)
+            self.refresh_sidebar()
+            self.update_server_status()
 
     def srv_histbatch(self, msg: dict) -> None:
         chan = str(msg.get("chan", ""))
@@ -284,7 +300,10 @@ class ServerModeMixin:
             counts[chan] = counts.get(chan, 0) + 1
             if mentioned:
                 self.srv.setdefault("mentions", set()).add(chan)
-            self.mark_active_channel()
+            if self.conv is self.active:
+                self.mark_active_channel()
+        if not mine:
+            self.bump_unread(self.conv, mentioned)
 
     def srv_deleted(self, msg: dict) -> None:
         chan = str(msg.get("chan", ""))
@@ -561,9 +580,11 @@ class ServerModeMixin:
         sidebar.display = visible
 
     def refresh_sidebar(self) -> None:
-        if self.state != SERVER:
+        conv = self.conv
+        if conv.kind != "server" or conv is not self.active:
             return
-        s = self.srv
+        self.show_channel_list(True)
+        s = conv.srv
         self.query_one("#srvname", Static).update(s["name"][:20])
 
         listed = [w.channel for w in self.query(ChannelItem)]
@@ -617,6 +638,8 @@ class ServerModeMixin:
         self.chat.write(Text(f"  — #{chan} —", style="bright_black"))
 
     def update_server_status(self, extra: str = "") -> None:
+        if self.conv is not self.active:
+            return
         s = self.srv
         right = f"#{s['channel']} · {len(s['online'])} online"
         if extra:

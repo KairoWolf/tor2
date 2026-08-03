@@ -5,20 +5,27 @@ server with Discord-style channels. No accounts, no phone numbers, no company
 in the middle — just two computers finding each other through the Tor network.
 
 ```
- kairos-server  ·  #general · 3 online
+ kairos  ·  #general · 3 online
 ┌──────────────┬────────────────────────────────────────────────┐
-│ kairos       │ 14:02 mia   ▸ did the build finish?            │
-│──────────────│ 14:02 kairo ▸ yeah, pushed it                  │
-│ ▸ #general   │ 14:03 mia   ▸ [image · 240 KB] /get 7          │
-│   #random    │                                                │
-│   #music     │                                                │
+│ chats        │ 14:02 [41] mia   ▸ did the build finish?       │
+│ ▣ kairos     │ 14:02 [42] kairo ▸ yeah, pushed it             │
+│ ▸ mia    2   │ 14:03 [43] zoe   ▸ [video · 82.1 MB] /get 12   │
+│ ▸ bob    @   │             ▀▀▀▀▀▀▀▀▀▀▀▀  (preview)            │
+│              │             ▀▀▀▀▀▀▀▀▀▀▀▀                       │
+│ kairos       │                                                │
+│ ▸ #general   │                                                │
+│   #random 3  │                                                │
 │              │                                                │
 │ online       │                                                │
-│  kairo       │                                                │
-│  mia         │                                                │
+│  kairo  mia  │                                                │
 └──────────────┴────────────────────────────────────────────────┘
+ uploading ▕████████████░░░░░░░░░░░░░░░░▏  43%
  message…  (/help for commands)
 ```
+
+Several conversations run at once — a server and any number of direct chats
+— with unread counts, `@` when someone mentions you, and inline previews for
+images and videos.
 
 > ### ⚖️ Lawful use only
 > tor2 is a privacy tool for legitimate private conversation. **Do not use it
@@ -173,7 +180,13 @@ systemctl status tor2-server            # running?      (--user if installed as 
 journalctl -u tor2-server -f            # live logs
 tor2-server ~/.local/share/tor2-server --address   # what's my address?
 tor2-server ~/.local/share/tor2-server --info      # address, channels, members
+tor2-server ~/.local/share/tor2-server --backup ~/backups   # save everything
 ```
+
+**Back it up.** The backup archive holds the database, stored media *and the
+onion identity key* — without it, a dead machine means a new address and
+everyone re-inviting. Restore by untarring it into an empty data directory.
+Treat the file as securely as the server itself.
 
 Admin commands inside tor2: `/mkchan`, `/rmchan`, `/kick`, `/ban`, `/unban`,
 `/bans`, `/promote`, `/demote`, `/newinvite`, `/autoupdate`.
@@ -202,6 +215,7 @@ repository completely.
 | command | what it does |
 |---|---|
 | `/help` | list commands for where you are |
+| **ctrl+n** / **ctrl+p** | switch between open conversations (or click one) |
 | `/nick <name>` | set your display name (remembered) |
 | `/update` | get the latest version from GitHub |
 | `/disconnect` | leave the current chat or server |
@@ -225,6 +239,8 @@ repository completely.
 | `/joinserver <address> <invite>` | join for the first time |
 | `/server [name]` | reconnect a saved server, or list them |
 | `/ch <name>` · `/channels` · `/members` | switch / list channels, see who's on |
+| `/more` | load older messages |
+| `/del <id>` | delete your message (admins: anyone's) |
 | `/leave` | disconnect and forget this server |
 
 ### Pictures and video
@@ -237,6 +253,10 @@ repository completely.
 | `/get <id>` | download something posted in a channel |
 | `/save [id]` | keep a previewed image (they aren't saved unless you ask) |
 | `/play [id]` | replay an animated GIF |
+
+Videos are previewed from a still image the sender attaches, so you can see
+what something is before downloading it. Compression and transfers show a
+progress bar.
 
 Downloads land in `./received/`. Animated GIFs play in a pane above the input
 bar.
@@ -284,6 +304,8 @@ Other protections:
 - **Media is verified** before it's kept: images must fully decode, videos
   must probe as real video, and everything must match its SHA-256.
 - **Servers won't fill their own disk** — uploads are refused at 80% usage.
+- **Flood protection**: 15 messages per 10 seconds per member, so nobody can
+  push a channel's history out through the retention limit.
 
 **Limitations, honestly:** a live 5-digit code is guessable in principle
 (100,000 options), though a guesser still only reaches your accept prompt.
@@ -313,6 +335,10 @@ On Debian and Ubuntu the venv module ships separately:
 **Video is rejected as "not a readable video"**
 ffmpeg isn't installed. Text and images work without it;
 `apt install ffmpeg` (or your package manager's equivalent) enables video.
+
+**A conversation dropped**
+It reconnects by itself with backoff, using your saved membership. `/server
+<name>` forces an immediate retry.
 
 **A server command says "admin only"**
 Only admins can manage channels and members. An existing admin can promote
