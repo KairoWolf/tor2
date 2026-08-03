@@ -188,6 +188,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         current.value?.disconnect()
         val client = ServerClient(tor, viewModelScope, store, nick.value, saved)
         current.value = client
+        watchDownloads(client)
         viewModelScope.launch { client.connect(joinCode = digits) }
     }
 
@@ -245,7 +246,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         current.value?.disconnect()
         val client = ServerClient(tor, viewModelScope, store, nick.value, saved)
         current.value = client
+        watchDownloads(client)
         viewModelScope.launch { client.connect(invite) }
+    }
+
+    private fun watchDownloads(client: ServerClient) {
+        viewModelScope.launch {
+            client.downloadReady.collect { file ->
+                if (file != null) {
+                    onDownloadFinished(file)
+                    client.downloadReady.value = null
+                }
+            }
+        }
     }
 
     fun leave(saved: SavedServer) {
@@ -279,6 +292,43 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun download(id: Int) {
         viewModelScope.launch { current.value?.fetch(id) }
+    }
+
+    /**
+     * Play something. If it is already on the phone it opens straight away,
+     * otherwise it downloads first and opens when it lands — tapping play
+     * should play, not silently queue a transfer.
+     */
+    fun openMedia(info: MediaInfo) {
+        val existing = findDownloaded(info)
+        if (existing != null) {
+            if (!OpenMedia.open(getApplication(), existing)) {
+                banner.value = "No app on this phone can open ${info.display}"
+            }
+            return
+        }
+        val client = current.value ?: return
+        banner.value = "Downloading ${info.display}…"
+        pendingOpen = info.id
+        viewModelScope.launch { client.fetch(info.id) }
+    }
+
+    private var pendingOpen: Int? = null
+
+    private fun findDownloaded(info: MediaInfo): File? {
+        val dir = File(store.mediaDir, "received")
+        if (!dir.isDirectory) return null
+        return dir.listFiles()?.firstOrNull { it.name.startsWith("media_${info.id}.") }
+    }
+
+    /** Called when a download finishes, so a tapped video opens by itself. */
+    private fun onDownloadFinished(file: File) {
+        val wanted = pendingOpen ?: return
+        if (!file.name.startsWith("media_$wanted.")) return
+        pendingOpen = null
+        if (!OpenMedia.open(getApplication(), file)) {
+            banner.value = "Saved, but no app here can open ${file.name}"
+        }
     }
 
     fun deleteMessage(id: Int) {

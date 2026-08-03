@@ -103,11 +103,23 @@ this server**, which asks before removing it and its saved membership.
 That is also where to find the address when someone asks you for it, rather
 than having to go back to whoever set the server up.
 
+## Running a server from the phone
+
+If you are an admin, the shield in the channel header opens **Manage
+server**: create an 8-digit invite code (with uses and an admin flag), add or
+delete channels, and kick, ban, unban, promote or demote members. Whatever
+the server replies — a freshly minted code, for instance — appears at the
+top with a copy button.
+
+## Playing media
+
+Tap a video's still to play it. If it is not on the phone yet it downloads
+first and opens as soon as it lands, in whatever player the phone uses.
+Long-press any message to copy or delete it.
+
 ## What is not on mobile yet
 
 - Multi-circuit parallel transfers are implemented (`Parallel.kt`, tested) but
   are not yet switched on for uploads from the phone.
-- Server administration: use the desktop client for `/ban`, `/promote`,
-  channels and minting join codes.
 
 Lawful use only — see the main README.

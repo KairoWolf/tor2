@@ -52,6 +52,7 @@ fun ChatPane(
     client: ServerClient,
     onOpenChannels: () -> Unit,
     onOpenMembers: () -> Unit,
+    onOpenAdmin: () -> Unit = {},
 ) {
     val channels by client.channels.collectAsState()
     val active by client.active.collectAsState()
@@ -60,6 +61,7 @@ fun ChatPane(
     val transfer by client.transfer.collectAsState()
     val notice by client.notice.collectAsState()
     val state by client.state.collectAsState()
+    val isAdmin by client.isAdmin.collectAsState()
     val messages = byChannel[active].orEmpty()
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -78,8 +80,10 @@ fun ChatPane(
             channel = active,
             online = online.size,
             connected = state == ConnState.Connected,
+            isAdmin = isAdmin,
             onChannels = onOpenChannels,
             onMembers = onOpenMembers,
+            onAdmin = onOpenAdmin,
         )
 
         AnimatedVisibility(
@@ -116,6 +120,7 @@ fun ChatPane(
                         onPreview = { vm.preview(it) },
                         onDownload = { vm.download(it) },
                         onDelete = { vm.deleteMessage(it) },
+                        onOpen = { vm.openMedia(it) },
                     )
                 }
             }
@@ -139,8 +144,8 @@ fun ChatPane(
 
 @Composable
 private fun ChannelHeader(
-    channel: String, online: Int, connected: Boolean,
-    onChannels: () -> Unit, onMembers: () -> Unit,
+    channel: String, online: Int, connected: Boolean, isAdmin: Boolean,
+    onChannels: () -> Unit, onMembers: () -> Unit, onAdmin: () -> Unit,
 ) {
     Surface(tonalElevation = 3.dp, shadowElevation = 2.dp) {
         Row(
@@ -159,6 +164,11 @@ private fun ChannelHeader(
                          maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 ConnectionDot(connected, online)
+            }
+            if (isAdmin) {
+                IconButton(onClick = onAdmin) {
+                    Icon(Icons.Default.AdminPanelSettings, "manage server")
+                }
             }
             IconButton(onClick = onMembers) {
                 Icon(Icons.Default.People, "members")
@@ -242,6 +252,7 @@ fun MessageRow(
     onPreview: (Int) -> Unit,
     onDownload: (Int) -> Unit,
     onDelete: (Int) -> Unit,
+    onOpen: (MediaInfo) -> Unit,
 ) {
     var showActions by remember { mutableStateOf(false) }
     val enter = remember {
@@ -289,13 +300,28 @@ fun MessageRow(
             // A still travels with every picture and video, so the chat shows
             // what something is without anyone tapping download first.
             msg.media?.takeIf { msg.inlineImage == null }
-                ?.let { MediaCard(it, onPreview, onDownload) }
+                ?.let { MediaCard(it, onPreview, onDownload, onOpen) }
 
             AnimatedVisibility(showActions && msg.id != null,
                                enter = expandVertically() + fadeIn(),
                                exit = shrinkVertically() + fadeOut()) {
-                Row(Modifier.padding(start = 40.dp, top = 4.dp)) {
-                    AssistChip(onClick = { msg.id?.let(onDelete) },
+                val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+                Row(Modifier.padding(start = 40.dp, top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    msg.body?.takeIf { it.isNotBlank() }?.let { body ->
+                        AssistChip(
+                            onClick = {
+                                clipboard.setText(
+                                    androidx.compose.ui.text.AnnotatedString(body))
+                                showActions = false
+                            },
+                            label = { Text("Copy") },
+                            leadingIcon = {
+                                Icon(Icons.Default.ContentCopy, null,
+                                     Modifier.size(16.dp))
+                            })
+                    }
+                    AssistChip(onClick = { msg.id?.let(onDelete); showActions = false },
                                label = { Text("Delete") },
                                leadingIcon = {
                                    Icon(Icons.Default.DeleteOutline, null,
@@ -343,7 +369,7 @@ private fun InlineImage(bytes: ByteArray) {
 
 @Composable
 private fun MediaCard(info: MediaInfo, onPreview: (Int) -> Unit,
-                      onDownload: (Int) -> Unit) {
+                      onDownload: (Int) -> Unit, onOpen: (MediaInfo) -> Unit) {
     val icon = when (info.kind) {
         "aud" -> Icons.Default.MusicNote
         "img" -> Icons.Default.Image
@@ -355,7 +381,9 @@ private fun MediaCard(info: MediaInfo, onPreview: (Int) -> Unit,
         modifier = Modifier.padding(start = 40.dp, top = 6.dp).fillMaxWidth(0.92f),
     ) {
         Column(Modifier.padding(10.dp)) {
-            info.thumb?.let { InlineThumb(it, info.kind == "vid") }
+            info.thumb?.let {
+                InlineThumb(it, info.kind != "img") { onOpen(info) }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(10.dp))
@@ -379,14 +407,15 @@ private fun MediaCard(info: MediaInfo, onPreview: (Int) -> Unit,
 }
 
 @Composable
-private fun InlineThumb(bytes: ByteArray, isVideo: Boolean) {
+private fun InlineThumb(bytes: ByteArray, isVideo: Boolean, onPlay: () -> Unit) {
     val bitmap = remember(bytes) {
         runCatching {
             android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         }.getOrNull()
     }
     bitmap?.let {
-        Box(contentAlignment = Alignment.Center) {
+        Box(contentAlignment = Alignment.Center,
+            modifier = Modifier.clickable(enabled = isVideo) { onPlay() }) {
             androidx.compose.foundation.Image(
                 bitmap = it.asImageBitmap(),
                 contentDescription = "preview",
@@ -396,7 +425,7 @@ private fun InlineThumb(bytes: ByteArray, isVideo: Boolean) {
             )
             if (isVideo) {
                 Box(Modifier.size(52.dp).clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.5f)),
+                        .background(Color.Black.copy(alpha = 0.55f)),
                     contentAlignment = Alignment.Center) {
                     Icon(Icons.Default.PlayArrow, "play", tint = Color.White,
                          modifier = Modifier.size(30.dp))

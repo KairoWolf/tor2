@@ -45,6 +45,7 @@ fun MainScreen(vm: AppViewModel) {
     var showMembers by remember { mutableStateOf(false) }
     var showStartChat by remember { mutableStateOf(false) }
     var infoFor by remember { mutableStateOf<SavedServer?>(null) }
+    var showAdmin by remember { mutableStateOf(false) }
     val openChat by vm.openChat.collectAsState()
     val incoming by vm.incomingRequest.collectAsState()
 
@@ -97,6 +98,7 @@ fun MainScreen(vm: AppViewModel) {
                                         vm = vm, client = it,
                                         onOpenChannels = { scope.launch { drawer.open() } },
                                         onOpenMembers = { showMembers = true },
+                                        onOpenAdmin = { showAdmin = true },
                                     )
                                 }
                                 else -> NoServerYet(
@@ -125,6 +127,7 @@ fun MainScreen(vm: AppViewModel) {
     }
     if (showSettings) SettingsSheet(vm) { showSettings = false }
     if (showMembers) client?.let { MembersSheet(it) { showMembers = false } }
+    if (showAdmin) client?.let { AdminSheet(vm, it) { showAdmin = false } }
     PreviewOverlay(client)
 }
 
