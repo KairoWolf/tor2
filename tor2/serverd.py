@@ -17,6 +17,7 @@ import re
 import os
 import shutil
 import signal
+import time
 import sqlite3
 import sys
 from pathlib import Path
@@ -31,6 +32,7 @@ DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "tor2-server"
 HISTORY_ON_JOIN = 50
 JOIN_CODE_PERSON = "tor2-server-join-v1"
 UPDATE_CHECK_INTERVAL = 24 * 60 * 60
+VERSION = "4"   # protocol/daemon generation, for staleness checks
 RATE_WINDOW = 10.0        # seconds
 RATE_MAX = 15             # messages per window per member
 AUTH_FAIL_WINDOW = 300.0  # seconds
@@ -136,11 +138,23 @@ class Tor2Server:
         print("=" * 68 + "\n", flush=True)
 
         self.local_port = port
+        self.db.set_meta("daemon_version", VERSION)
+        self.db.set_meta("heartbeat", str(time.time()))
+        asyncio.create_task(self.heartbeat_loop())
         await self.publish_join_codes()
         asyncio.create_task(self.update_loop())
         asyncio.create_task(self.watch_join_codes())
         async with server:
             await server.serve_forever()
+
+    async def heartbeat_loop(self) -> None:
+        """A timestamp other commands can read to tell if we are running."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                self.db.set_meta("heartbeat", str(time.time()))
+            except Exception:
+                return
 
     async def publish_join_codes(self) -> None:
         """Give every live join code its own temporary address.
@@ -851,6 +865,38 @@ class Tor2Server:
         return sorted({cl.nick for cl in self.clients if cl.authed})
 
 
+def db_meta_snapshot(data_dir: Path, passphrase: str | None) -> dict:
+    db = ServerDB(data_dir, vault=atrest.Vault(
+        atrest.load_key(data_dir, passphrase)))
+    try:
+        return {"heartbeat": db.get_meta("heartbeat"),
+                "version": db.get_meta("daemon_version"),
+                "onion": db.get_meta("onion")}
+    finally:
+        db.close()
+
+
+def daemon_status(meta: dict) -> str:
+    """Say plainly whether a running server will pick this up.
+
+    A code only works once the daemon publishes the address it derives, so a
+    stale or stopped daemon means the digits reach nothing — worth saying
+    rather than leaving someone staring at "reconnecting".
+    """
+    try:
+        beat = float(meta.get("heartbeat") or 0)
+    except (TypeError, ValueError):
+        beat = 0
+    age = time.time() - beat
+    if beat and age < 180:
+        if meta.get("version") == VERSION:
+            return "A running server will publish it within a minute."
+        return ("The running server is an OLD build that cannot publish join "
+                "codes. Restart it: systemctl restart tor2-server")
+    return ("No running server detected. Start it (systemctl start tor2-server) "
+            "— the code cannot be reached until it publishes the address.")
+
+
 def make_backup(data_dir: Path, dest: Path) -> Path:
     """Archive the database, onion key and media into one .tar.gz.
 
@@ -909,6 +955,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="with --joincode: how long it stays valid (default 24)")
     ap.add_argument("--address", action="store_true",
                     help="print this server's onion address and exit")
+    ap.add_argument("--codes", action="store_true",
+                    help="list live join codes and whether they are published")
     ap.add_argument("--info", action="store_true",
                     help="print address, name, channels and member count, then exit")
     ap.add_argument("--backup", metavar="DEST",
@@ -941,8 +989,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"They type just these digits — no address needed. "
               f"{uses} use{'s' if uses != 1 else ''}, valid {args.hours}h.",
               file=sys.stderr)
-        print("A running server picks it up within a minute; otherwise it goes "
-              "live at next start.", file=sys.stderr)
+        print(daemon_status(db_meta_snapshot(data_dir, passphrase)), file=sys.stderr)
         return 0
 
     if args.invite or args.admin_invite:
@@ -968,6 +1015,21 @@ def main(argv: list[str] | None = None) -> int:
         print(dest)
         print("Contains the onion identity key — keep it as safe as the server "
               "itself.", file=sys.stderr)
+        return 0
+
+    if args.codes:
+        meta = db_meta_snapshot(data_dir, passphrase)
+        db = ServerDB(data_dir, vault=atrest.Vault(
+            atrest.load_key(data_dir, passphrase)))
+        live = db.active_join_codes()
+        db.close()
+        if not live:
+            print("no join codes are live")
+        for e in live:
+            left = int(max(0, e["expires"] - time.time()) // 3600)
+            print(f"{e['code']}  {e['uses_left']} use(s)"
+                  f"{'  admin' if e['is_admin'] else ''}  expires in {left}h")
+        print(daemon_status(meta), file=sys.stderr)
         return 0
 
     if args.address or args.info:

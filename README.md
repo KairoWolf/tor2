@@ -164,9 +164,15 @@ On the server machine, at any time:
 tor2-server ~/.local/share/tor2-server --joincode           # one use, 24h
 tor2-server ~/.local/share/tor2-server --joincode 5 --hours 12
 tor2-server ~/.local/share/tor2-server --joincode --admin
+tor2-server ~/.local/share/tor2-server --codes      # what is live, and is it published?
 ```
 
-A running server picks up a code minted this way within a minute. Or, as an
+A running server picks up a code minted this way within a minute — and these
+commands tell you whether one is actually running. **A code only works once
+the server publishes the address it derives**, so if the daemon is stopped or
+running an old build, the digits reach nothing and the other end just says
+"reconnecting". Both commands say so plainly; the fix is
+`systemctl restart tor2-server`. Or, as an
 admin inside tor2 while connected to the server:
 
 ```
