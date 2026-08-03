@@ -1,57 +1,60 @@
 # tor2
 
-Encrypted chat over Tor onion services, in your terminal — private
-two-person conversations plus self-hosted servers with channels.
-Text, images, and videos only — no file transfer, no remote commands, no
-computer access.
+**Private chat in your terminal, over Tor.** Talk one-to-one, or run your own
+server with Discord-style channels. No accounts, no phone numbers, no company
+in the middle — just two computers finding each other through the Tor network.
 
-> ## ⚖️ Legal use only
->
-> **tor2 is intended solely for lawful use.** It is a privacy tool for
-> legitimate private communication between two consenting people — journalists
-> and sources, people under censorship, friends who value privacy, or anyone
-> learning about Tor and cryptography.
->
-> Do **not** use this software for any illegal activity. You are responsible
-> for complying with all laws that apply to you, including laws governing the
-> use of encryption and of the Tor network in your jurisdiction. The authors
-> provide this software as-is, without warranty, and accept no responsibility
-> for misuse (see [LICENSE](LICENSE)).
+```
+ kairos-server  ·  #general · 3 online
+┌──────────────┬────────────────────────────────────────────────┐
+│ kairos       │ 14:02 mia   ▸ did the build finish?            │
+│──────────────│ 14:02 kairo ▸ yeah, pushed it                  │
+│ ▸ #general   │ 14:03 mia   ▸ [image · 240 KB] /get 7          │
+│   #random    │                                                │
+│   #music     │                                                │
+│              │                                                │
+│ online       │                                                │
+│  kairo       │                                                │
+│  mia         │                                                │
+└──────────────┴────────────────────────────────────────────────┘
+ message…  (/help for commands)
+```
 
-## Features
+> ### ⚖️ Lawful use only
+> tor2 is a privacy tool for legitimate private conversation. **Do not use it
+> for anything illegal.** You are responsible for following the laws that
+> apply to you, including any governing encryption and Tor. Provided as-is,
+> with no warranty and no responsibility for misuse — see [LICENSE](LICENSE).
 
-- **Serverless** — each side publishes an ephemeral v3 onion service; Tor
-  handles reachability and NAT traversal. No account, no middleman.
-- **5-digit pairing codes** — instead of dictating a 56-character onion
-  address, run `/code` and have your peer type `/join 48213`. The code
-  deterministically derives a temporary rendezvous onion address on both
-  ends, so even the pairing step needs no server.
-- **Accept gate** — nobody can start chatting with you just by knowing your
-  address or code. Every incoming session shows the peer's name and the
-  session fingerprint, and waits for your `/accept` or `/reject`.
-- **Contacts** — `/add mia` after a chat (or `/add mia <onion>`) and next
-  time it's just `/connect mia`. Stored in `~/.config/tor2/`.
-- **Images & videos** — images preview inline in the terminal; videos are
-  auto-compressed with ffmpeg (≤480p H.264) and sent chunked with progress.
-- **Triple encryption** — Tor's onion encryption, an ephemeral X25519
-  session layer with forward secrecy and a human-verifiable fingerprint, and
-  an inner tor2-only XSalsa20-Poly1305 layer that only this program can
-  produce or parse.
-- **Self-hosted servers** — run a daemon on your own box and get
-  Discord-style channels, invite codes, roles, and searchable history, all
-  reachable only as an onion service. See [Self-hosting a server](#self-hosting-a-server).
-- **Persistent nickname** — `/nick` is remembered across restarts.
+---
 
-## Requirements
+## Contents
 
-- Linux or macOS with **Tor installed** (`pacman -S tor` / `apt install tor`
-  / `brew install tor`). It does not need to run as a service — tor2 starts
-  its own private instance.
-- **ffmpeg** for video support (optional; everything else works without it).
-- **Python 3.11+**, plus `python3-venv` on Debian/Ubuntu (it ships
-  separately there).
+1. [Install](#1-install)
+2. [Chat with one person](#2-chat-with-one-person)
+3. [Run a server](#3-run-a-server)
+4. [Command reference](#4-command-reference)
+5. [How it keeps things private](#5-how-it-keeps-things-private)
+6. [Troubleshooting](#6-troubleshooting)
 
-## Install
+---
+
+## 1. Install
+
+You need **Tor**, **Python 3.11+**, and optionally **ffmpeg** for video.
+
+```sh
+# Debian / Ubuntu
+sudo apt install -y tor git python3-venv ffmpeg
+
+# Arch
+sudo pacman -S tor git python ffmpeg
+
+# macOS
+brew install tor git python ffmpeg
+```
+
+Then:
 
 ```sh
 git clone https://github.com/KairoWolf/tor2.git
@@ -60,61 +63,67 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-## Use
-
-Both people run:
+Run it any time with:
 
 ```sh
+cd ~/tor2
 .venv/bin/python -m tor2
 ```
 
-Wait for Tor to bootstrap (~30–60 s on first run). Then either:
+The first start takes 30–60 seconds while Tor connects. When it's ready your
+own address appears in the top bar. Later starts are quicker.
 
-**Easiest — pairing code.** One person types `/code` and reads the 5-digit
-code to the other, who types `/join <code>`. Codes are valid for 15 minutes
-and retire after one use.
+> Tor does **not** need to be running as a service — tor2 launches its own
+> private copy and shuts it down when you quit.
 
-**Or — onion address.** Your address is in the top bar; send it over any
-channel and your peer runs `/connect <address>`.
+---
 
-Either way, the receiving side sees:
+## 2. Chat with one person
+
+Both people open tor2. Then pick whichever is easier:
+
+**Option A — a 5-digit code (easiest).** One of you types:
 
 ```
-• incoming chat request from “mia”
+/code
+```
+
+You get something like `48213`. Read it to the other person, who types:
+
+```
+/join 48213
+```
+
+**Option B — the full address.** Send the `.onion` address from your top bar
+over any channel, and the other person runs `/connect <address>`.
+
+Either way the receiver sees a request and decides:
+
+```
+• incoming chat request from "mia"
 • session fingerprint: d860-7390-ab18-4808
 • type /accept to start chatting, or /reject to refuse
 ```
 
-After `/accept`, **verify the fingerprint** — both screens must show the
-same code. Then just type to chat.
+**Check the fingerprint matches on both screens**, then chat. Nobody can talk
+to you without you accepting first.
 
-| command | effect |
-|---|---|
-| `/code` | publish a 5-digit pairing code (`/code off` cancels) |
-| `/join <code>` | connect using a peer's pairing code |
-| `/connect <contact-or-onion>` | connect directly |
-| `/accept` · `/reject` | answer an incoming chat request |
-| `/img <path>` | send an image (png/jpg/gif/webp/bmp, ≤5 MB) |
-| `/vid <path>` | send a video (auto-compressed, ≤10 min) |
-| `/big-vid <path>` | send a long video — any length, up to 3 GB |
-| `/add <name> [onion]` | save a contact (defaults to current peer) |
-| `/contacts` · `/delcontact <name>` | list / remove contacts |
-| `/nick <name>` | set your display name (persists) |
-| `/disconnect` | drop the session |
-| `ctrl+q` | quit — removes your onion service |
+Afterwards, save them so you never need the address again:
 
-Received images and videos are validated and saved to `./received/`.
+```
+/add mia          then next time just:   /connect mia
+```
 
-## Self-hosting a server
+---
 
-A tor2 server is a small daemon you run on your own machine (a homelab box,
-a spare Pi, anything that stays on). It publishes one **stable** onion
-address and hosts Discord-style channels. There is no cloud service involved
-and no port forwarding to configure.
+## 3. Run a server
 
-### Install
+A server is a small program on a machine you own — a homelab box, a spare Pi,
+a VPS. It has one permanent address and hosts channels.
 
-On the machine that will host it:
+### Set it up
+
+On the server machine:
 
 ```sh
 git clone https://github.com/KairoWolf/tor2.git
@@ -122,132 +131,189 @@ cd tor2
 ./install-server.sh my-server-name
 ```
 
-The script checks dependencies, creates the virtualenv, initializes
-`~/.local/share/tor2-server/`, installs a **systemd user service** so the
-server survives reboots, and prints:
+That's it. The script installs everything, sets it to start on boot, and
+prints:
 
 ```
-  address: ukmb36ciovvnnpp5….onion
-  admin invite (one use): kfpr-2xmq-nwte
+address:  ukmb36ciovvnnpp5….onion
+admin invite (one use):  kfpr-2xmq-nwte
 
-  In tor2, join it with:
-      /joinserver ukmb36ciovvnnpp5….onion kfpr-2xmq-nwte
+In tor2, join it with:
+    /joinserver ukmb36ciovvnnpp5….onion kfpr-2xmq-nwte
 ```
 
-Re-running the script is safe — it never overwrites an existing data
-directory, and the onion address stays the same across restarts.
+Run as **root** it installs a system service; as a normal user, a user
+service. Re-running is safe — it never touches existing data, and the address
+never changes.
 
-Managing it:
+### Invite people
 
-As **root** (a dedicated box or LXC container) it installs a system service;
-as a normal user it installs a `--user` service. Manage it with whichever
-scope the installer reports:
+Invite codes are **single use**, so each person needs their own. As an admin
+inside tor2:
+
+```
+/newinvite            one code
+/newinvite 5          one code five people can use
+```
+
+Or on the server machine:
 
 ```sh
-systemctl status tor2-server               # root install
-systemctl --user status tor2-server        # user install
-journalctl -u tor2-server -f               # live logs (add --user if applicable)
-
-# these all work from any directory
-SRV="/root/tor2/.venv/bin/tor2-server ~/.local/share/tor2-server"
-$SRV --address      # the server's onion address
-$SRV --info         # address, name, channels, member count
-$SRV --invite       # mint another one-use invite code
+/root/tor2/.venv/bin/tor2-server ~/.local/share/tor2-server --invite
 ```
 
-Invite codes are single-use by default. The admin invite printed at install
-time is consumed by the first person who joins, so mint a fresh code for
-each additional member — either with the command above, or with
-`/newinvite` (or `/newinvite 5` for a five-use code) inside tor2 as an
-admin.
+Send them the address plus their code, and they run `/joinserver <address>
+<code>`. After that they just use `/server <name>` — their membership is
+saved.
 
-### Joining and using a server
+### Manage it
+
+```sh
+systemctl status tor2-server            # running?      (--user if installed as a user)
+journalctl -u tor2-server -f            # live logs
+tor2-server ~/.local/share/tor2-server --address   # what's my address?
+tor2-server ~/.local/share/tor2-server --info      # address, channels, members
+```
+
+Admin commands inside tor2: `/mkchan`, `/rmchan`, `/kick`, `/ban`, `/unban`,
+`/bans`, `/promote`, `/demote`, `/newinvite`, `/autoupdate`.
+
+### Auto-updating (optional, off by default)
+
+An admin can let the server update itself from GitHub:
 
 ```
-/joinserver <onion> <invite-code> [local-name]   # first time
-/server <local-name>                             # afterwards — no invite needed
+/autoupdate on      check daily and restart onto new versions
+/autoupdate now     check once, right now
+/autoupdate off     stop (the default)
 ```
 
-Your membership token is saved, so rejoining is one command. Inside a
-server, a sidebar lists channels and who is online, and the input bar posts
-to the current channel.
+It only ever **fast-forwards** the checkout, refuses if you have local
+changes or a different git remote, and never merges or resets. Even so, this
+runs code downloaded from the internet — only enable it if you trust that
+repository completely.
 
-**Switching channels:** click one in the sidebar, or press **↑/↓** — the
-input bar keeps focus either way, so you can keep typing. `/ch <name>`
-still works if you prefer commands.
+---
 
-| command | effect |
+## 4. Command reference
+
+### Anywhere
+
+| command | what it does |
 |---|---|
-| `/ch <name>` | switch channel (or just click / press ↑↓) |
-| `/channels` · `/members` | list channels / who's online |
-| `/img <path>` | post an image (shown inline to everyone) |
-| `/vid <path>` | post a video (auto-compressed; others download on demand) |
-| `/big-vid <path>` | post a long video — any length, up to 3 GB |
-| `/get <id>` | download a posted video |
-| `/disconnect` | return to direct-message mode |
+| `/help` | list commands for where you are |
+| `/nick <name>` | set your display name (remembered) |
+| `/update` | get the latest version from GitHub |
+| `/disconnect` | leave the current chat or server |
+| `ctrl+q` | quit |
+
+### One-to-one chat
+
+| command | what it does |
+|---|---|
+| `/code` · `/join <code>` | pair with a 5-digit code |
+| `/connect <name-or-address>` | connect to a saved contact or address |
+| `/accept` · `/reject` | answer an incoming request |
+| `/add <name>` | save the person you're talking to |
+| `/contacts` · `/delcontact <name>` | list / remove contacts |
+
+### On a server
+
+| command | what it does |
+|---|---|
+| **click a channel** or **↑ / ↓** | switch channels (typing still works) |
+| `/joinserver <address> <invite>` | join for the first time |
+| `/server [name]` | reconnect a saved server, or list them |
+| `/ch <name>` · `/channels` · `/members` | switch / list channels, see who's on |
 | `/leave` | disconnect and forget this server |
 
-Admins additionally get `/mkchan <name>`, `/rmchan <name>`, `/kick <nick>`,
-and `/newinvite [uses] [admin]` to mint invite codes.
+### Pictures and video
 
-### Large videos
+| command | what it does |
+|---|---|
+| `/img <path>` | send an image — it previews for everyone automatically |
+| `/vid <path>` | send a video, auto-compressed (up to 10 min) |
+| `/big-vid <path>` | send a long video — any length, up to 3 GB |
+| `/get <id>` | download something posted in a channel |
+| `/save [id]` | keep a previewed image (they aren't saved unless you ask) |
+| `/play [id]` | replay an animated GIF |
 
-`/big-vid` removes the length limit of `/vid` and allows up to **3 GB** per
-video, in direct messages and in channels. Files are streamed chunk by chunk
-straight from and to disk, so a multi-gigabyte transfer uses only tens of
-megabytes of memory on either side, and every transfer is checked against
-its SHA-256 before it is kept.
+Downloads land in `./received/`. Animated GIFs play in a pane above the input
+bar.
 
-Two things protect the server from filling up:
+### Admin only
 
-- Uploads are **refused once the server's disk passes 80% used**, and also
-  refused if the incoming file would push it past 80%. The member gets a
-  clear message saying so.
-- Stored media is capped (20 GB by default, oldest evicted first). Override
-  with `TOR2_MEDIA_CAP_BYTES` in the service environment if you have a
-  bigger disk.
+| command | what it does |
+|---|---|
+| `/newinvite [uses] [admin]` | mint an invite code |
+| `/mkchan <name>` · `/rmchan <name>` | create / delete a channel |
+| `/kick <nick>` | remove a member (they can rejoin with a new invite) |
+| `/ban <nick> [reason]` · `/unban <nick>` · `/bans` | block a name entirely |
+| `/promote <nick>` · `/demote <nick>` | grant or remove admin |
+| `/autoupdate on\|off\|now` | self-updating from GitHub |
 
-Be realistic about time: Tor moves roughly 0.5–2 MB/s on a good circuit, so
-a 3 GB video can take hours. Compression usually shrinks long videos
-enormously (they are re-encoded to ≤480p H.264), and the size actually sent
-is reported before the transfer starts.
+---
 
-### What a server does and doesn't protect
+## 5. How it keeps things private
 
-- Members reach the server only over Tor, through the same double-encrypted
-  session used for direct messages, and only with a valid invite.
-- **The server operator can read channel messages.** The daemon decrypts
-  them to route and store them — the same trust model as a self-hosted
-  Matrix or Mattermost. Run it yourself, and use direct messages (which stay
-  end-to-end encrypted between the two people) for anything you don't want
-  the host to see.
-- History is capped at 500 messages per channel and media at 2 GB total,
-  oldest evicted first. Kicking a member revokes their token immediately.
+**One-to-one chats are end-to-end encrypted** and involve no server at all.
+Three layers protect every message:
 
-## Safety properties
+1. **Tor's onion encryption.** An onion address is derived from a public key,
+   so reaching the right address proves you reached the right machine. It also
+   hides your IP from the other person.
+2. **A per-session key exchange** (X25519). New keys every session, so
+   recording today's traffic doesn't help anyone who steals a key tomorrow.
+   This produces the **fingerprint** you read aloud to catch an impostor.
+3. **A tor2-only inner cipher.** Even something holding the outer key can't
+   read or forge tor2 frames without implementing this layer.
 
-- Onion addresses are self-authenticating: connecting to the right address
-  cryptographically guarantees you reached the holder of that key.
-- The accept gate means knowing an address or code only lets someone
-  *request* a chat; the fingerprint confirms *who* you accepted.
-- The message surface is a fixed, small set of chat and channel messages —
-  there is no file-transfer or command type, and nothing a peer or server
-  sends can run code or touch your machine outside `./received/`. Unknown
-  types and frames missing the inner tor2 layer terminate the session.
-- Server members must present a valid invite or a saved token before the
-  daemon will accept anything else from them; secrets are stored only as
-  hashes, so a stolen server database cannot be used to log in.
-- Media is validated before it is kept: images must fully decode in PIL
-  (decompression-bomb guard active), videos must probe as real video via
-  ffprobe and match their announced size and SHA-256.
-- Frames capped at 16 MB, images 5 MB, videos 60 MB compressed, nicknames
-  and contact names sanitized. Sender-supplied filenames are never used.
+**On a server, the operator can read channel messages.** The daemon has to
+decrypt them to deliver and store them — the same as self-hosted Matrix or
+Mattermost. Run it yourself, and use one-to-one chats for anything the host
+shouldn't see.
 
-## Limitations to understand
+Other protections:
 
-- A pairing code is guessable in principle (100,000 combinations) while it
-  is live — that only lets a guesser *request* a chat, which you can reject,
-  but prefer full addresses if you're being actively targeted.
-- Tor is slow; a 60 MB video can take many minutes to transfer.
-- This is a hobby project, not audited software. Do not rely on it in
-  situations where your safety depends on it.
+- **Nobody talks to you unless you accept.** Knowing your address or code only
+  lets someone ask.
+- **Servers need an invite.** Secrets are stored only as hashes, so a stolen
+  server database can't be used to log in.
+- **No command surface.** The protocol carries chat and media, nothing that
+  can run code or read your files. Anything unrecognized ends the session.
+- **Media is verified** before it's kept: images must fully decode, videos
+  must probe as real video, and everything must match its SHA-256.
+- **Servers won't fill their own disk** — uploads are refused at 80% usage.
+
+**Limitations, honestly:** a live 5-digit code is guessable in principle
+(100,000 options), though a guesser still only reaches your accept prompt.
+Tor is slow, so large videos take a long time. And this is a hobby project,
+not audited software — don't rely on it where your safety depends on it.
+
+---
+
+## 6. Troubleshooting
+
+**"peer is not speaking the tor2 protocol (or runs an old version)"**
+You and the other person are on different versions. Both run `/update` (or
+`git pull`), then restart.
+
+**Stuck on "bootstrapping tor"**
+The first connection to the Tor network can take a couple of minutes on a slow
+link. If it never finishes, check that `tor` is installed: `tor --version`.
+
+**"invalid or used-up invite code"**
+Invite codes work once. Ask the server admin for a fresh one with
+`/newinvite`.
+
+**The installer says it can't create a virtualenv**
+On Debian and Ubuntu the venv module ships separately:
+`apt install -y python3-venv`.
+
+**Video is rejected as "not a readable video"**
+ffmpeg isn't installed. Text and images work without it;
+`apt install ffmpeg` (or your package manager's equivalent) enables video.
+
+**A server command says "admin only"**
+Only admins can manage channels and members. An existing admin can promote
+you with `/promote <your-nick>`.
