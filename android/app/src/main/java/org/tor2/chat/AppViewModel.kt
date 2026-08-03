@@ -375,15 +375,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private var imagePicker: (() -> Unit)? = null
     private var mediaPicker: (() -> Unit)? = null
+    private var audioPicker: (() -> Unit)? = null
 
-    fun attachPickers(image: () -> Unit, media: () -> Unit) {
+    fun attachPickers(image: () -> Unit, media: () -> Unit, audio: () -> Unit) {
         imagePicker = image
         mediaPicker = media
+        audioPicker = audio
     }
 
     fun pickImage() { imagePicker?.invoke() }
 
     fun pickMedia() { mediaPicker?.invoke() }
+
+    fun pickAudio() { audioPicker?.invoke() }
 
     fun setSetting(key: String, value: Any) {
         store.saveSetting(key, value)

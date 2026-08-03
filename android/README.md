@@ -111,6 +111,16 @@ delete channels, and kick, ban, unban, promote or demote members. Whatever
 the server replies — a freshly minted code, for instance — appears at the
 top with a copy button.
 
+## Sending things
+
+Tap **+** next to the message box for **Picture**, **Video** or **Audio**, in
+both channels and direct chats. Oversized pictures are shrunk to fit, and
+videos travel with a still so people can see what something is before
+downloading it.
+
+Tap the conversation, or scroll it, to put the keyboard away when you just
+want to read.
+
 ## Playing media
 
 Tap a video's still to play it. If it is not on the phone yet it downloads

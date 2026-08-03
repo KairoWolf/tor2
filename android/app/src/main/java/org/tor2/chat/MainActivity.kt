@@ -29,6 +29,10 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.GetContent()
     ) { uri: Uri? -> uri?.let { sendPicked(it, "vid") } }
 
+    private val pickAudio = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? -> uri?.let { sendPicked(it, "aud") } }
+
     private val torConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as? TorService.LocalBinder ?: return
@@ -55,7 +59,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        vm.attachPickers(::launchImagePicker, ::launchMediaPicker)
+        vm.attachPickers(::launchImagePicker, ::launchMediaPicker, ::launchAudioPicker)
 
         // Bind rather than startForegroundService: Android requires a
         // foreground service to call startForeground() within a few seconds,
@@ -73,6 +77,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun launchImagePicker() = pickImage.launch("image/*")
     private fun launchMediaPicker() = pickMedia.launch("video/*")
+
+    private fun launchAudioPicker() = pickAudio.launch("audio/*")
 
     private fun sendPicked(uri: Uri, kind: String) {
         val name = queryName(uri)

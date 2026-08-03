@@ -32,6 +32,10 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -103,7 +107,19 @@ fun ChatPane(
             TransferStrip(transfer)
         }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        val focus = LocalFocusManager.current
+        val keyboard = LocalSoftwareKeyboardController.current
+        // reading should not mean fighting the keyboard: a tap or a scroll
+        // puts it away
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+                if (scrolling) { focus.clearFocus(); keyboard?.hide() }
+            }
+        }
+        Box(Modifier.weight(1f).fillMaxWidth()
+                .pointerInput(Unit) {
+                    detectTapGestures { focus.clearFocus(); keyboard?.hide() }
+                }) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
@@ -168,7 +184,9 @@ fun ChatPane(
         Composer(
             enabled = state == ConnState.Connected,
             onSend = { vm.send(it) },
-            onAttach = { vm.pickImage() },
+            onPicture = { vm.pickImage() },
+            onVideo = { vm.pickMedia() },
+            onAudio = { vm.pickAudio() },
         )
     }
 }
@@ -304,11 +322,12 @@ private fun dayLabel(timestamp: Long): String {
 @Composable
 private fun EmptyChannel(channel: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Icon(Icons.Default.ChatBubbleOutline, null, Modifier.size(46.dp),
-             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-        Spacer(Modifier.height(10.dp))
-        Text("#$channel is quiet", style = MaterialTheme.typography.titleMedium)
-        Text("Say something to start it off",
+        Icon(Icons.Default.ChatBubbleOutline, null, Modifier.size(52.dp),
+             tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f))
+        Spacer(Modifier.height(12.dp))
+        Text("#$channel is quiet", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(4.dp))
+        Text("Say something, or tap + to share a picture, video or song",
              style = MaterialTheme.typography.bodyMedium,
              color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
@@ -347,9 +366,12 @@ fun MessageRow(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Avatar(msg.nick)
                     Spacer(Modifier.width(8.dp))
+                    val hue = remember(msg.nick) {
+                        (msg.nick.hashCode().toFloat() % 360f + 360f) % 360f
+                    }
                     Text(msg.nick, style = MaterialTheme.typography.titleMedium,
                          color = if (msg.mine) MaterialTheme.colorScheme.primary
-                                 else MaterialTheme.colorScheme.onSurface)
+                                 else Color.hsl(hue, 0.5f, 0.72f))
                     Spacer(Modifier.width(8.dp))
                     Text(clock.format(Date(msg.timestamp)),
                          style = MaterialTheme.typography.labelSmall,
@@ -408,8 +430,9 @@ fun MessageRow(
 
 @Composable
 private fun Avatar(nick: String) {
+    // a stable colour per person, so the eye can track who is speaking
     val hue = remember(nick) { (nick.hashCode().toFloat() % 360f + 360f) % 360f }
-    val color = remember(hue) { Color.hsl(hue, 0.45f, 0.55f) }
+    val color = remember(hue) { Color.hsl(hue, 0.5f, 0.62f) }
     Box(
         Modifier.size(32.dp).clip(CircleShape).background(color.copy(alpha = 0.25f))
             .border(1.dp, color.copy(alpha = 0.6f), CircleShape),
@@ -466,13 +489,14 @@ private fun MediaCard(info: MediaInfo, onPreview: (Int) -> Unit,
                     Text(fmtSize(info.size), style = MaterialTheme.typography.labelSmall,
                          color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (info.kind != "img") {
-                    IconButton(onClick = { onPreview(info.id) }) {
-                        Icon(Icons.Default.Visibility, "preview")
+                if (info.kind == "vid" || info.kind == "aud") {
+                    FilledTonalIconButton(onClick = { onOpen(info) }) {
+                        Icon(Icons.Default.PlayArrow, "play")
                     }
+                    Spacer(Modifier.width(6.dp))
                 }
                 IconButton(onClick = { onDownload(info.id) }) {
-                    Icon(Icons.Default.Download, "download")
+                    Icon(Icons.Default.Download, "save")
                 }
             }
         }
@@ -512,18 +536,39 @@ private fun InlineThumb(bytes: ByteArray, isVideo: Boolean, onPlay: () -> Unit) 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Composer(enabled: Boolean, onSend: (String) -> Unit,
-                     onAttach: () -> Unit) {
+                     onPicture: () -> Unit, onVideo: () -> Unit,
+                     onAudio: () -> Unit) {
     var text by remember { mutableStateOf("") }
+    var showAttach by remember { mutableStateOf(false) }
     val canSend = text.isNotBlank() && enabled
     Surface(tonalElevation = 3.dp) {
+      Column(Modifier.windowInsetsPadding(
+                 WindowInsets.ime.union(WindowInsets.navigationBars))) {
+        AnimatedVisibility(showAttach, enter = expandVertically() + fadeIn(),
+                           exit = shrinkVertically() + fadeOut()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistChip(onClick = { showAttach = false; onPicture() },
+                           label = { Text("Picture") },
+                           leadingIcon = { Icon(Icons.Default.Image, null,
+                                                Modifier.size(18.dp)) })
+                AssistChip(onClick = { showAttach = false; onVideo() },
+                           label = { Text("Video") },
+                           leadingIcon = { Icon(Icons.Default.Movie, null,
+                                                Modifier.size(18.dp)) })
+                AssistChip(onClick = { showAttach = false; onAudio() },
+                           label = { Text("Audio") },
+                           leadingIcon = { Icon(Icons.Default.MusicNote, null,
+                                                Modifier.size(18.dp)) })
+            }
+        }
         Row(
-            Modifier.fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
-                .padding(8.dp),
+            Modifier.fillMaxWidth().padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onAttach, enabled = enabled) {
-                Icon(Icons.Default.AddPhotoAlternate, "attach")
+            IconButton(onClick = { showAttach = !showAttach }, enabled = enabled) {
+                Icon(if (showAttach) Icons.Default.Close
+                     else Icons.Default.AddPhotoAlternate, "attach")
             }
             TextField(
                 value = text,
@@ -555,6 +600,7 @@ private fun Composer(enabled: Boolean, onSend: (String) -> Unit,
                 Icon(Icons.AutoMirrored.Filled.Send, "send")
             }
         }
+      }
     }
 }
 

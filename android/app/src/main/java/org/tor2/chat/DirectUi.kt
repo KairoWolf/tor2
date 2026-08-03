@@ -23,6 +23,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -110,7 +114,18 @@ fun DirectPane(vm: AppViewModel, chat: DirectChat, onBack: () -> Unit) {
             }
         }
 
-        LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(),
+        val focus = LocalFocusManager.current
+        val keyboard = LocalSoftwareKeyboardController.current
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+                if (scrolling) { focus.clearFocus(); keyboard?.hide() }
+            }
+        }
+        LazyColumn(state = listState,
+                   modifier = Modifier.weight(1f).fillMaxWidth()
+                       .pointerInput(Unit) {
+                           detectTapGestures { focus.clearFocus(); keyboard?.hide() }
+                       },
                    contentPadding = PaddingValues(12.dp)) {
             items(msgs) { m -> Bubble(m) }
         }
