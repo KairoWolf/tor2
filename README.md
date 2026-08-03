@@ -96,6 +96,7 @@ same code. Then just type to chat.
 | `/accept` · `/reject` | answer an incoming chat request |
 | `/img <path>` | send an image (png/jpg/gif/webp/bmp, ≤5 MB) |
 | `/vid <path>` | send a video (auto-compressed, ≤10 min) |
+| `/big-vid <path>` | send a long video — any length, up to 3 GB |
 | `/add <name> [onion]` | save a contact (defaults to current peer) |
 | `/contacts` · `/delcontact <name>` | list / remove contacts |
 | `/nick <name>` | set your display name (persists) |
@@ -181,12 +182,35 @@ still works if you prefer commands.
 | `/channels` · `/members` | list channels / who's online |
 | `/img <path>` | post an image (shown inline to everyone) |
 | `/vid <path>` | post a video (auto-compressed; others download on demand) |
+| `/big-vid <path>` | post a long video — any length, up to 3 GB |
 | `/get <id>` | download a posted video |
 | `/disconnect` | return to direct-message mode |
 | `/leave` | disconnect and forget this server |
 
 Admins additionally get `/mkchan <name>`, `/rmchan <name>`, `/kick <nick>`,
 and `/newinvite [uses] [admin]` to mint invite codes.
+
+### Large videos
+
+`/big-vid` removes the length limit of `/vid` and allows up to **3 GB** per
+video, in direct messages and in channels. Files are streamed chunk by chunk
+straight from and to disk, so a multi-gigabyte transfer uses only tens of
+megabytes of memory on either side, and every transfer is checked against
+its SHA-256 before it is kept.
+
+Two things protect the server from filling up:
+
+- Uploads are **refused once the server's disk passes 80% used**, and also
+  refused if the incoming file would push it past 80%. The member gets a
+  clear message saying so.
+- Stored media is capped (20 GB by default, oldest evicted first). Override
+  with `TOR2_MEDIA_CAP_BYTES` in the service environment if you have a
+  bigger disk.
+
+Be realistic about time: Tor moves roughly 0.5–2 MB/s on a good circuit, so
+a 3 GB video can take hours. Compression usually shrinks long videos
+enormously (they are re-encoded to ≤480p H.264), and the size actually sent
+is reported before the transfer starts.
 
 ### What a server does and doesn't protect
 

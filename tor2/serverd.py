@@ -12,21 +12,20 @@ import argparse
 import asyncio
 import base64
 import binascii
-import hashlib
 import logging
 import re
+import shutil
 import signal
 import sys
 from pathlib import Path
 
-from . import proto
+from . import media, proto
 from .serverdb import ServerDB
 from .tornet import TorNet
 
 log = logging.getLogger("tor2.server")
 
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "tor2-server"
-MAX_UPLOAD_CHUNKS = proto.MAX_VIDEO_BYTES // proto.VIDEO_CHUNK + 2
 HISTORY_ON_JOIN = 50
 
 
@@ -45,7 +44,7 @@ class Client:
         self.is_admin = False
         self.channel = "general"
         self.upload: dict | None = None
-        self.out: asyncio.Queue = asyncio.Queue(maxsize=256)
+        self.out: asyncio.Queue = asyncio.Queue(maxsize=128)
 
     @property
     def authed(self) -> bool:
@@ -251,51 +250,75 @@ class Tor2Server:
                 raise ValueError("bad media kind")
             size = int(msg.get("size", 0))
             chunks = int(msg.get("chunks", 0))
-            cap = proto.MAX_IMAGE_BYTES if kind == "img" else proto.MAX_VIDEO_BYTES
-            if not (0 < size <= cap) or not (0 < chunks <= MAX_UPLOAD_CHUNKS):
-                raise ValueError("bad media size")
+            cap = (proto.MAX_IMAGE_BYTES if kind == "img"
+                   else proto.MAX_BIG_VIDEO_BYTES)
+            if not (0 < size <= cap):
+                raise ValueError(f"too large (max {cap // 1024 // 1024} MB)")
+            if not media.plausible_chunk_count(size, chunks):
+                raise ValueError("bad chunk count")
             ext = re.sub(r"[^a-z0-9]", "", str(msg.get("ext", ""))[:5]) or (
                 "png" if kind == "img" else "mp4")
             chan = str(msg.get("chan", c.channel))
             if self.db.channel_id(chan) is None:
                 raise ValueError("no such channel")
+            self.check_storage(size)
         except ValueError as e:
             c.enqueue({"t": "srverr", "msg": f"upload rejected: {e}"})
             return
-        c.upload = {"kind": kind, "ext": ext, "size": size, "chunks": chunks,
-                    "sha": str(msg.get("sha256", ""))[:64], "chan": chan,
-                    "parts": [], "got": 0}
+
+        if c.upload is not None:      # a new upload supersedes an abandoned one
+            c.upload["sink"].abort()
+        sink = media.ChunkSink(size, chunks, str(msg.get("sha256", ""))[:64],
+                               ext=ext, tmp_dir=self.db.media_dir)
+        c.upload = {"kind": kind, "ext": ext, "chan": chan, "sink": sink}
+        if size > proto.MAX_VIDEO_BYTES:
+            log.info("%s uploading %s (%.1f MB)", c.nick, ext, size / 1024 / 1024)
+
+    def check_storage(self, incoming: int) -> None:
+        """Refuse uploads that would push the disk past the limit."""
+        d = self.db.data_dir
+        used = media.used_fraction(d)
+        if used >= proto.SERVER_DISK_LIMIT:
+            raise ValueError(
+                f"server storage is {used * 100:.0f}% full — ask the admin to "
+                "free space")
+        if not media.room_for(d, incoming):
+            raise ValueError("not enough free space on the server for this file")
+        st = shutil.disk_usage(d)
+        if (st.used + incoming) / st.total >= proto.SERVER_DISK_LIMIT:
+            raise ValueError(
+                f"this upload would push the server past "
+                f"{proto.SERVER_DISK_LIMIT * 100:.0f}% disk usage")
 
     async def do_mchunk(self, c: Client, msg: dict) -> None:
         up = c.upload
         if up is None:
             return
+        sink = up["sink"]
         try:
             data = base64.b64decode(msg.get("data", ""), validate=True)
-        except (binascii.Error, ValueError):
+            sink.write(data)
+        except (binascii.Error, ValueError, OSError) as e:
+            sink.abort()
             c.upload = None
-            c.enqueue({"t": "srverr", "msg": "upload rejected: corrupt chunk"})
+            c.enqueue({"t": "srverr", "msg": f"upload rejected: {e}"})
             return
-        up["parts"].append(data)
-        up["got"] += len(data)
-        if up["got"] > up["size"]:
-            c.upload = None
-            c.enqueue({"t": "srverr", "msg": "upload rejected: larger than announced"})
+        if not sink.complete:
             return
-        if len(up["parts"]) < up["chunks"]:
-            return
+
         c.upload = None
-        blob = b"".join(up["parts"])
-        if hashlib.sha256(blob).hexdigest() != up["sha"]:
-            c.enqueue({"t": "srverr", "msg": "upload rejected: checksum mismatch"})
+        try:
+            mid = self.db.add_media_file(up["kind"], up["ext"], sink)
+        except ValueError as e:
+            c.enqueue({"t": "srverr", "msg": f"upload rejected: {e}"})
             return
-        mid = self.db.add_media(up["kind"], up["ext"], blob, up["sha"])
         stored = self.db.add_message(up["chan"], c.member_id, c.nick, None, mid)
         # Images are small enough to push to everyone; videos are announced and
         # fetched on demand so one upload doesn't flood every Tor circuit.
         if up["kind"] == "img":
-            payload = base64.b64encode(blob).decode()
-            self.broadcast({"t": "event", **stored, "inline": payload})
+            blob = self.db.media_bytes(mid)
+            self.broadcast({"t": "event", **stored,
+                            "inline": base64.b64encode(blob).decode()})
         else:
             self.broadcast({"t": "event", **stored})
 
@@ -305,18 +328,33 @@ class Tor2Server:
         except (TypeError, ValueError):
             return
         info = self.db.media_info(mid)
-        blob = self.db.media_bytes(mid) if info else None
-        if not info or blob is None:
+        path = self.db.media_path(mid) if info else None
+        if not info or path is None or not path.is_file():
             c.enqueue({"t": "srverr", "msg": f"no media #{mid}"})
             return
-        chunks = [blob[i:i + proto.VIDEO_CHUNK]
-                  for i in range(0, len(blob), proto.VIDEO_CHUNK)]
+        # Read from disk as we go: a 3 GB download must not be materialized.
+        chunk_size = proto.chunk_size_for(info["size"])
+        n_chunks = max(1, (info["size"] + chunk_size - 1) // chunk_size)
         c.enqueue({"t": "mget", "id": mid, "kind": info["kind"], "ext": info["ext"],
                    "size": info["size"], "sha256": info["sha256"],
-                   "chunks": len(chunks)})
-        for chunk in chunks:
-            c.enqueue({"t": "mgchunk", "id": mid,
-                       "data": base64.b64encode(chunk).decode()})
+                   "chunks": n_chunks})
+        asyncio.create_task(self.stream_media(c, path, chunk_size, mid))
+
+    async def stream_media(self, c: Client, path: Path, chunk_size: int,
+                           mid: int) -> None:
+        """Write chunks straight to the socket rather than through the outbound
+        queue: queueing a multi-gigabyte download would buffer it in memory,
+        and Session.send already serializes frames, so chat still interleaves.
+        """
+        try:
+            with path.open("rb") as f:
+                while chunk := f.read(chunk_size):
+                    if c not in self.clients:
+                        return
+                    await c.session.send({"t": "mgchunk", "id": mid,
+                                          "data": base64.b64encode(chunk).decode()})
+        except (OSError, ConnectionError, asyncio.CancelledError) as e:
+            log.info("media #%s stream to %s ended: %s", mid, c.nick, e)
 
     # ---------- admin ----------
 

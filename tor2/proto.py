@@ -26,8 +26,17 @@ INNER_PERSON = b"tor2-inner-v1"
 
 MAX_FRAME = 16 * 1024 * 1024
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
-MAX_VIDEO_BYTES = 60 * 1024 * 1024
+MAX_VIDEO_BYTES = 60 * 1024 * 1024        # /vid — quick clips
+MAX_BIG_VIDEO_BYTES = 3 * 1024 * 1024 * 1024   # /big-vid — any length
 VIDEO_CHUNK = 512 * 1024
+BIG_CHUNK = 2 * 1024 * 1024               # fewer round trips for huge files
+
+# Fraction of the server's disk above which uploads are refused.
+SERVER_DISK_LIMIT = 0.80
+
+
+def chunk_size_for(size: int) -> int:
+    return BIG_CHUNK if size > MAX_VIDEO_BYTES else VIDEO_CHUNK
 
 # Direct peer-to-peer chat.
 DM_TYPES = {"hello", "accept", "txt", "img", "vmeta", "vchunk"}

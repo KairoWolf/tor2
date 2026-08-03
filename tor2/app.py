@@ -14,22 +14,15 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Input, RichLog, Static
 
-from . import proto, store, video
+from . import media, proto, store, video
+from .app_consts import RECEIVED_DIR, fmt_size
 from .clientserver import SERVER, ChannelItem, ServerModeMixin
 from .imgview import render_preview, validate_image
 from .tornet import TorNet, code_to_key, normalize_onion, onion_from_pub
 
 CODE_TTL_S = 15 * 60
 
-RECEIVED_DIR = Path.cwd() / "received"
-
 IDLE, PENDING_IN, PENDING_OUT, CONNECTED = "idle", "pending_in", "pending_out", "connected"
-
-
-def fmt_size(n: int) -> str:
-    if n < 1024 * 1024:
-        return f"{max(1, n // 1024)} KB"
-    return f"{n / 1024 / 1024:.1f} MB"
 
 
 def clean_nick(raw: str) -> str:
@@ -379,47 +372,48 @@ class Tor2App(ServerModeMixin, App):
             size = int(msg.get("size", 0))
             chunks = int(msg.get("chunks", 0))
             sha = str(msg.get("sha256", ""))
-            if not (0 < size <= proto.MAX_VIDEO_BYTES):
+            if not (0 < size <= proto.MAX_BIG_VIDEO_BYTES):
                 raise ValueError("bad size")
-            if not (0 < chunks <= size // proto.VIDEO_CHUNK + 1):
+            if not media.plausible_chunk_count(size, chunks):
                 raise ValueError("bad chunk count")
+            RECEIVED_DIR.mkdir(exist_ok=True)
+            if not media.room_for(RECEIVED_DIR, size):
+                raise ValueError(f"not enough free disk space for {fmt_size(size)}")
         except ValueError as e:
             self.sys_msg(f"rejected incoming video: {e}", "red")
             return
-        self._incoming_video = {"size": size, "chunks": chunks, "sha": sha,
-                                "parts": [], "got": 0}
+        if self._incoming_video is not None:
+            self._incoming_video.abort()
+        # Streams to a temp file: a multi-gigabyte video never sits in memory.
+        self._incoming_video = media.ChunkSink(size, chunks, sha, ext="mp4",
+                                               tmp_dir=RECEIVED_DIR)
         self.sys_msg(f"{self.peer_nick} is sending a video ({fmt_size(size)})…",
                      "magenta")
 
     async def handle_video_chunk(self, msg: dict) -> None:
-        iv = self._incoming_video
-        if iv is None:
+        sink = self._incoming_video
+        if sink is None:
             return
         try:
-            data = base64.b64decode(msg.get("data", ""), validate=True)
-        except Exception:
-            self.sys_msg("rejected corrupt video chunk", "red")
+            sink.write(base64.b64decode(msg.get("data", ""), validate=True))
+        except Exception as e:
+            sink.abort()
             self._incoming_video = None
-            return
-        iv["parts"].append(data)
-        iv["got"] += len(data)
-        if iv["got"] > iv["size"]:
-            self.sys_msg("rejected video: larger than announced", "red")
-            self._incoming_video = None
-            return
-        pct = iv["got"] * 100 // iv["size"]
-        self.set_status(f"receiving video from “{self.peer_nick}”… {pct}%")
-        if len(iv["parts"]) < iv["chunks"]:
-            return
-        # complete — verify and save
-        self._incoming_video = None
-        blob = b"".join(iv["parts"])
-        if hashlib.sha256(blob).hexdigest() != iv["sha"]:
-            self.sys_msg("rejected video: checksum mismatch", "red")
+            self.sys_msg(f"rejected video: {e}", "red")
             self.set_status(f"connected to “{self.peer_nick}” ✓")
             return
+        self.set_status(f"receiving video from “{self.peer_nick}”… {sink.progress}%")
+        if not sink.complete:
+            return
+
+        self._incoming_video = None
         dest = self._next_received("vid", "mp4")
-        dest.write_bytes(blob)
+        try:
+            await asyncio.to_thread(sink.finish, dest)
+        except (ValueError, OSError) as e:
+            self.sys_msg(f"rejected video: {e}", "red")
+            self.set_status(f"connected to “{self.peer_nick}” ✓")
+            return
         if video.have_ffmpeg():
             try:
                 await asyncio.to_thread(video.validate_received, dest)
@@ -431,7 +425,7 @@ class Tor2App(ServerModeMixin, App):
         else:
             self.sys_msg("note: ffmpeg not installed, saved without verifying "
                          "it decodes as video", "yellow")
-        self.sys_msg(f"{self.peer_nick} sent a video ({fmt_size(len(blob))}) → {dest}",
+        self.sys_msg(f"{self.peer_nick} sent a video ({fmt_size(sink.size)}) → {dest}",
                      "magenta")
         self.set_status(f"connected to “{self.peer_nick}” ✓")
 
@@ -477,7 +471,7 @@ class Tor2App(ServerModeMixin, App):
         self.chat.write(render_preview(data))
         self.sys_msg(f"image sent ({len(data) // 1024} KB)", "green")
 
-    async def send_video(self, path_str: str) -> None:
+    async def send_video(self, path_str: str, big: bool = False) -> None:
         if not self._require_connected():
             return
         if not video.have_ffmpeg():
@@ -487,53 +481,69 @@ class Tor2App(ServerModeMixin, App):
         if not src.is_file():
             self.sys_msg(f"no such file: {src}", "red")
             return
-        if src.stat().st_size > video.MAX_SOURCE_BYTES:
-            self.sys_msg("source video too large (500 MB max)", "red")
+        prepared = await self.prepare_video(src, big)
+        if prepared is None:
             return
+        payload, tmpdir = prepared
+        try:
+            if not self._require_connected():
+                return
+            size = payload.stat().st_size
+            self.sys_msg(f"sending video: {fmt_size(size)} "
+                         f"(tor is slow — this can take a while)")
+            sha = await asyncio.to_thread(media.sha256_file, payload)
+            await media.send_file(
+                self.session, payload, {"t": "vmeta"}, "vchunk",
+                proto.chunk_size_for(size), sha,
+                on_progress=lambda sent, total: self.set_status(
+                    f"sending video… {sent * 100 // total}%"),
+                keep_going=lambda: self.state == CONNECTED)
+        except ConnectionError:
+            self.sys_msg("video send aborted: session ended", "red")
+            return
+        finally:
+            tmpdir.cleanup()
+            if self.state == CONNECTED:
+                self.set_status(f"connected to “{self.peer_nick}” ✓")
+        self.sys_msg("video sent ✓", "green")
+
+    async def prepare_video(self, src: Path, big: bool):
+        """Probe and compress. Returns (payload_path, tmpdir) or None."""
+        limit = video.MAX_BIG_SOURCE_BYTES if big else video.MAX_SOURCE_BYTES
+        if src.stat().st_size > limit:
+            self.sys_msg(f"source video too large (max {fmt_size(limit)})", "red")
+            return None
         try:
             info = await asyncio.to_thread(video.probe, src)
         except Exception as e:
             self.sys_msg(f"not a readable video: {e}", "red")
-            return
-        if info["duration"] > video.MAX_DURATION_S:
-            self.sys_msg("video too long (10 min max)", "red")
-            return
+            return None
+        if not big and info["duration"] > video.MAX_DURATION_S:
+            self.sys_msg("video too long (10 min max) — use /big-vid instead", "red")
+            return None
 
-        self.sys_msg(f"compressing {src.name} ({info['duration']:.0f}s)…")
+        mins = info["duration"] / 60
+        self.sys_msg(f"compressing {src.name} ({mins:.1f} min)"
+                     + (" — this can take a while for long videos…" if big else "…"))
         self.set_status("compressing video…")
-        with tempfile.TemporaryDirectory(prefix="tor2vid-") as tmp:
-            out = Path(tmp) / "out.mp4"
-            try:
-                await asyncio.to_thread(video.compress, src, out)
-            except Exception as e:
-                self.sys_msg(str(e), "red")
-                self.set_status(f"connected to “{self.peer_nick}” ✓")
-                return
-            blob = out.read_bytes()
-        if len(blob) > proto.MAX_VIDEO_BYTES:
-            self.sys_msg("still over 60 MB after compression — send a shorter clip", "red")
-            self.set_status(f"connected to “{self.peer_nick}” ✓")
-            return
-        if not self._require_connected():
-            return
+        tmpdir = tempfile.TemporaryDirectory(prefix="tor2vid-")
+        out = Path(tmpdir.name) / "out.mp4"
+        try:
+            await asyncio.to_thread(video.compress, src, out)
+        except Exception as e:
+            self.sys_msg(str(e), "red")
+            tmpdir.cleanup()
+            return None
 
-        chunks = [blob[i:i + proto.VIDEO_CHUNK]
-                  for i in range(0, len(blob), proto.VIDEO_CHUNK)]
-        await self.session.send({
-            "t": "vmeta", "size": len(blob), "chunks": len(chunks),
-            "sha256": hashlib.sha256(blob).hexdigest(),
-        })
-        self.sys_msg(f"sending video: {fmt_size(len(blob))} compressed "
-                     f"(tor is slow — this can take a while)")
-        for i, chunk in enumerate(chunks, 1):
-            if self.state != CONNECTED:
-                self.sys_msg("video send aborted: session ended", "red")
-                return
-            await self.session.send(
-                {"t": "vchunk", "data": base64.b64encode(chunk).decode()})
-            self.set_status(f"sending video… {i * 100 // len(chunks)}%")
-        self.set_status(f"connected to “{self.peer_nick}” ✓")
-        self.sys_msg("video sent ✓", "green")
+        size = out.stat().st_size
+        cap = proto.MAX_BIG_VIDEO_BYTES if big else proto.MAX_VIDEO_BYTES
+        if size > cap:
+            self.sys_msg(
+                f"still {fmt_size(size)} after compression — over the "
+                f"{fmt_size(cap)} limit", "red")
+            tmpdir.cleanup()
+            return None
+        return out, tmpdir
 
     # ---------- input ----------
 
@@ -576,6 +586,8 @@ class Tor2App(ServerModeMixin, App):
                 self.run_worker(self.send_image(arg), exclusive=False)
             case "/vid" | "/video":
                 self.run_worker(self.send_video(arg), exclusive=False)
+            case "/big-vid" | "/bigvid":
+                self.run_worker(self.send_video(arg, big=True), exclusive=False)
             case "/add":
                 self.cmd_add(arg)
             case "/contacts":
@@ -606,6 +618,7 @@ class Tor2App(ServerModeMixin, App):
                     "/accept · /reject           — answer an incoming chat request",
                     "/img <path>                 — send an image (≤5 MB)",
                     "/vid <path>                 — send a video (auto-compressed, ≤10 min)",
+                    "/big-vid <path>             — send a long video (any length, ≤3 GB)",
                     "/add <name> [onion]         — save a contact (defaults to current peer)",
                     "/contacts · /delcontact <name>",
                     "/nick <name>                — set your display name (persists)",
@@ -633,6 +646,9 @@ class Tor2App(ServerModeMixin, App):
                 self.run_worker(self.server_send_media(arg, "img"), exclusive=False)
             case "/vid" | "/video":
                 self.run_worker(self.server_send_media(arg, "vid"), exclusive=False)
+            case "/big-vid" | "/bigvid":
+                self.run_worker(self.server_send_media(arg, "vid", big=True),
+                                exclusive=False)
             case "/get":
                 await self.server_fetch(arg)
             case "/mkchan" | "/rmchan" | "/newinvite" | "/kick":
@@ -653,6 +669,7 @@ class Tor2App(ServerModeMixin, App):
                     "/channels · /members",
                     "/img <path>        — post an image (shown inline to everyone)",
                     "/vid <path>        — post a video (others download with /get)",
+                    "/big-vid <path>    — post a long video (any length, ≤3 GB)",
                     "/get <id>          — download a posted video",
                     "/disconnect        — go back to direct-message mode",
                     "/leave             — disconnect and forget this server",

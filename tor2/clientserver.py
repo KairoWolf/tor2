@@ -14,9 +14,12 @@ from pathlib import Path
 from rich.text import Text
 from textual.widgets import Static
 
-from . import proto, store, video
+from . import media, proto, store, video
 from .imgview import render_preview, validate_image
 from .tornet import normalize_onion
+
+# imported lazily from app to avoid a circular import at module load
+from .app_consts import RECEIVED_DIR, fmt_size
 
 SERVER = "server"
 HANDSHAKE_TIMEOUT = 60
@@ -236,45 +239,51 @@ class ServerModeMixin:
         try:
             size = int(msg.get("size", 0))
             chunks = int(msg.get("chunks", 0))
-            if not (0 < size <= proto.MAX_VIDEO_BYTES) or chunks <= 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            self.sys_msg("rejected download: bad header", "red")
+            if not (0 < size <= proto.MAX_BIG_VIDEO_BYTES):
+                raise ValueError("bad size")
+            if not media.plausible_chunk_count(size, chunks):
+                raise ValueError("bad chunk count")
+            RECEIVED_DIR.mkdir(exist_ok=True)
+            if not media.room_for(RECEIVED_DIR, size):
+                raise ValueError(f"not enough free disk space for {fmt_size(size)}")
+        except (TypeError, ValueError) as e:
+            self.sys_msg(f"rejected download: {e}", "red")
             return
         ext = "".join(ch for ch in str(msg.get("ext", "mp4"))[:5] if ch.isalnum()) or "mp4"
-        self.srv["download"] = {"size": size, "chunks": chunks, "parts": [], "got": 0,
-                                "sha": str(msg.get("sha256", ""))[:64],
-                                "kind": str(msg.get("kind", "vid")), "ext": ext}
-        self.sys_msg(f"downloading {size / 1024 / 1024:.1f} MB…", "magenta")
+        old = self.srv.get("download")
+        if old:
+            old["sink"].abort()
+        sink = media.ChunkSink(size, chunks, str(msg.get("sha256", ""))[:64],
+                               ext=ext, tmp_dir=RECEIVED_DIR)
+        self.srv["download"] = {"sink": sink, "kind": str(msg.get("kind", "vid")),
+                                "ext": ext}
+        self.sys_msg(f"downloading {fmt_size(size)}…", "magenta")
 
     async def srv_mgchunk(self, msg: dict) -> None:
         dl = self.srv.get("download")
         if dl is None:
             return
+        sink = dl["sink"]
         try:
-            data = base64.b64decode(msg.get("data", ""), validate=True)
-        except Exception:
+            sink.write(base64.b64decode(msg.get("data", ""), validate=True))
+        except Exception as e:
+            sink.abort()
             self.srv["download"] = None
-            self.sys_msg("download failed: corrupt chunk", "red")
-            return
-        dl["parts"].append(data)
-        dl["got"] += len(data)
-        if dl["got"] > dl["size"]:
-            self.srv["download"] = None
-            self.sys_msg("download failed: larger than announced", "red")
-            return
-        self.update_server_status(f"downloading {dl['got'] * 100 // dl['size']}%")
-        if len(dl["parts"]) < dl["chunks"]:
-            return
-        self.srv["download"] = None
-        blob = b"".join(dl["parts"])
-        if hashlib.sha256(blob).hexdigest() != dl["sha"]:
-            self.sys_msg("download failed: checksum mismatch", "red")
+            self.sys_msg(f"download failed: {e}", "red")
             self.update_server_status()
             return
-        prefix = "img" if dl["kind"] == "img" else "vid"
-        dest = self._next_received(prefix, dl["ext"])
-        dest.write_bytes(blob)
+        self.update_server_status(f"downloading {sink.progress}%")
+        if not sink.complete:
+            return
+
+        self.srv["download"] = None
+        dest = self._next_received("img" if dl["kind"] == "img" else "vid", dl["ext"])
+        try:
+            await asyncio.to_thread(sink.finish, dest)
+        except (ValueError, OSError) as e:
+            self.sys_msg(f"download failed: {e}", "red")
+            self.update_server_status()
+            return
         if dl["kind"] == "vid" and video.have_ffmpeg():
             try:
                 await asyncio.to_thread(video.validate_received, dest)
@@ -319,7 +328,8 @@ class ServerModeMixin:
         self.mark_active_channel()
         self.update_server_status()
 
-    async def server_send_media(self, path_str: str, kind: str) -> None:
+    async def server_send_media(self, path_str: str, kind: str,
+                                big: bool = False) -> None:
         if not self._srv_ready():
             return
         path = Path(path_str).expanduser()
@@ -336,53 +346,41 @@ class ServerModeMixin:
             except Exception as e:
                 self.sys_msg(f"not a supported image: {e}", "red")
                 return
+            payload, tmpdir = path, None
         else:
             if not video.have_ffmpeg():
                 self.sys_msg("ffmpeg is required to send video", "red")
                 return
-            try:
-                info = await asyncio.to_thread(video.probe, path)
-            except Exception as e:
-                self.sys_msg(f"not a readable video: {e}", "red")
-                return
-            if info["duration"] > video.MAX_DURATION_S:
-                self.sys_msg("video too long (10 min max)", "red")
-                return
-            self.sys_msg(f"compressing {path.name}…")
-            self.update_server_status("compressing video")
-            with tempfile.TemporaryDirectory(prefix="tor2vid-") as tmp:
-                out = Path(tmp) / "out.mp4"
-                try:
-                    await asyncio.to_thread(video.compress, path, out)
-                except Exception as e:
-                    self.sys_msg(str(e), "red")
-                    self.update_server_status()
-                    return
-                blob = out.read_bytes()
-            ext = "mp4"
-            if len(blob) > proto.MAX_VIDEO_BYTES:
-                self.sys_msg("still over 60 MB after compression — send a shorter clip",
-                             "red")
+            prepared = await self.prepare_video(path, big)
+            if prepared is None:
                 self.update_server_status()
                 return
+            payload, tmpdir = prepared
+            ext = "mp4"
 
-        if self.state != SERVER or self.session is None:
-            return
-        chunks = [blob[i:i + proto.VIDEO_CHUNK]
-                  for i in range(0, len(blob), proto.VIDEO_CHUNK)]
-        await self.session.send({
-            "t": "mput", "kind": kind, "ext": ext, "chan": self.srv["channel"],
-            "size": len(blob), "chunks": len(chunks),
-            "sha256": hashlib.sha256(blob).hexdigest()})
-        for i, chunk in enumerate(chunks, 1):
-            if self.state != SERVER:
-                self.sys_msg("upload aborted: session ended", "red")
+        try:
+            if self.state != SERVER or self.session is None:
                 return
-            await self.session.send({"t": "mchunk",
-                                     "data": base64.b64encode(chunk).decode()})
-            self.update_server_status(f"uploading {i * 100 // len(chunks)}%")
-        self.update_server_status()
-        self.sys_msg("uploaded ✓", "green")
+            size = payload.stat().st_size
+            if kind == "vid":
+                self.sys_msg(f"uploading {fmt_size(size)} "
+                             "(tor is slow — this can take a while)")
+            sha = await asyncio.to_thread(media.sha256_file, payload)
+            await media.send_file(
+                self.session, payload,
+                {"t": "mput", "kind": kind, "ext": ext, "chan": self.srv["channel"]},
+                "mchunk", proto.chunk_size_for(size), sha,
+                on_progress=lambda sent, total: self.update_server_status(
+                    f"uploading {sent * 100 // total}%"),
+                keep_going=lambda: self.state == SERVER)
+        except ConnectionError:
+            self.sys_msg("upload aborted: session ended", "red")
+            return
+        finally:
+            if tmpdir is not None:
+                tmpdir.cleanup()
+            self.update_server_status()
+        self.sys_msg("uploaded ✓ — the server will confirm or reject it", "green")
 
     async def server_fetch(self, arg: str) -> None:
         if not self._srv_ready():

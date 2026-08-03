@@ -5,6 +5,7 @@ so a stolen database does not let anyone authenticate as an existing member.
 """
 
 import hashlib
+import os
 import re
 import secrets
 import sqlite3
@@ -12,7 +13,10 @@ import time
 from pathlib import Path
 
 HISTORY_PER_CHANNEL = 500
-MEDIA_TOTAL_CAP = 2 * 1024 * 1024 * 1024  # 2 GB of blobs on disk
+# Blobs kept on disk. Big videos are allowed up to 3 GB each, so this has to
+# be roomy; the real backstop is the 80%-disk check in the daemon.
+MEDIA_TOTAL_CAP = int(os.environ.get("TOR2_MEDIA_CAP_BYTES",
+                                     20 * 1024 * 1024 * 1024))
 CHANNEL_RE = re.compile(r"^[a-z0-9][a-z0-9\-_]{0,23}$")
 
 SCHEMA = """
@@ -221,6 +225,31 @@ class ServerDB:
         self.db.commit()
         self._evict_media()
         return mid
+
+    def add_media_file(self, kind: str, ext: str, sink) -> int:
+        """Adopt a completed :class:`~tor2.media.ChunkSink` without reading it.
+
+        Raises ValueError (and discards the temp file) if it fails validation.
+        """
+        cur = self.db.execute(
+            "INSERT INTO media(kind,ext,size,sha256,path,created) VALUES(?,?,?,?,'',?)",
+            (kind, ext, sink.size, sink.sha, time.time()))
+        mid = cur.lastrowid
+        path = self.media_dir / f"{mid:06d}.{ext}"
+        try:
+            sink.finish(path)
+        except (ValueError, OSError):
+            self.db.execute("DELETE FROM media WHERE id=?", (mid,))
+            self.db.commit()
+            raise
+        self.db.execute("UPDATE media SET path=? WHERE id=?", (str(path), mid))
+        self.db.commit()
+        self._evict_media()
+        return mid
+
+    def media_path(self, media_id: int) -> Path | None:
+        r = self.db.execute("SELECT path FROM media WHERE id=?", (media_id,)).fetchone()
+        return Path(r["path"]) if r and r["path"] else None
 
     def media_info(self, media_id: int | None) -> dict | None:
         if media_id is None:

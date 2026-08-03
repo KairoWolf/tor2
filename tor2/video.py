@@ -5,8 +5,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-MAX_SOURCE_BYTES = 500 * 1024 * 1024  # refuse to even read sources above this
-MAX_DURATION_S = 10 * 60
+MAX_SOURCE_BYTES = 500 * 1024 * 1024      # /vid — refuse larger sources
+MAX_BIG_SOURCE_BYTES = 3 * 1024 * 1024 * 1024   # /big-vid
+MAX_DURATION_S = 10 * 60                  # /vid only; /big-vid has no limit
 
 
 def have_ffmpeg() -> bool:
