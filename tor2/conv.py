@@ -70,18 +70,25 @@ class LogProxy:
         self.app = app
         self.conv = conv
 
+    @property
+    def _on_screen(self) -> bool:
+        """Which conversation the user is actually looking at. With none open
+        that is the scratch log, so startup messages, /help and errors are
+        never written somewhere invisible."""
+        return self.conv is (self.app.active or self.app.scratch)
+
     def write(self, renderable) -> None:
         if self.conv is None:
             self.app.raw_log.write(renderable)
             return
         self.conv.append(renderable)
-        if self.conv is self.app.active:
+        if self._on_screen:
             self.app.raw_log.write(renderable)
 
     def clear(self) -> None:
         if self.conv is not None:
             self.conv.lines.clear()
-        if self.conv is None or self.conv is self.app.active:
+        if self.conv is None or self._on_screen:
             self.app.raw_log.clear()
 
 
