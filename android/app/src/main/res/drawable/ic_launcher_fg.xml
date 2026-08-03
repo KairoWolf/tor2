@@ -1,8 +1,14 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#A99BFF"
-        android:pathData="M54,30c-7.2,0 -13,5.8 -13,13v5h-3c-2.2,0 -4,1.8 -4,4v20c0,2.2 1.8,4 4,4h32c2.2,0 4,-1.8 4,-4V52c0,-2.2 -1.8,-4 -4,-4h-3v-5C67,35.8 61.2,30 54,30zM54,36c3.9,0 7,3.1 7,7v5H47v-5C47,39.1 50.1,36 54,36z"/>
-    <path android:fillColor="#5BD6A8"
-        android:pathData="M54,56m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0"/>
+
+    <!-- outer shield: privacy -->
+    <path android:pathData="M54,24L76,32v18c0,13.5 -9,25.5 -22,30c-13,-4.5 -22,-16.5 -22,-30V32z"
+        android:fillColor="#6C5CE0" />
+    <!-- inner layer, like the layers of an onion -->
+    <path android:pathData="M54,33L69,38v13c0,9.6 -6.3,18 -15,21.4c-8.7,-3.4 -15,-11.8 -15,-21.4V38z"
+        android:fillColor="#8E7FF0" />
+    <!-- speech notch: it is a chat app -->
+    <path android:pathData="M46,44h16c1.7,0 3,1.3 3,3v9c0,1.7 -1.3,3 -3,3h-7l-5,5v-5h-4c-1.7,0 -3,-1.3 -3,-3v-9C43,45.3 44.3,44 46,44z"
+        android:fillColor="#FFFFFF" />
 </vector>

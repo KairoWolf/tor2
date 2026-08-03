@@ -31,11 +31,6 @@
         <service
             android:name="org.torproject.jni.TorService"
             android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps the Tor connection alive while chatting" />
-        </service>
+            android:exported="false" />
     </application>
 </manifest>

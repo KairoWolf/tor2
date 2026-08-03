@@ -23,26 +23,55 @@ import java.net.Socket
  */
 class TorNet(private val context: Context) {
 
-    val status = MutableStateFlow("starting")
+    val status = MutableStateFlow("Starting Tor…")
     val bootstrapPercent = MutableStateFlow(0)
     val myOnion = MutableStateFlow<String?>(null)
-    var socksPort: Int = 9050
+
+    /** Discovered from the service — never assume the default port. */
+    @Volatile var socksPort: Int = 0
     private var control: TorControlConnection? = null
     private var serviceId: String? = null
 
-    /** Wait until Tor is bootstrapped and its SOCKS port is answering. */
-    suspend fun awaitReady(timeoutMs: Long = 180_000) = withContext(Dispatchers.IO) {
+    /**
+     * Wait until Tor is genuinely usable, reporting Tor's own bootstrap
+     * percentage rather than a made-up one that stalls short of the end.
+     */
+    suspend fun awaitReady(timeoutMs: Long = 300_000) = withContext(Dispatchers.IO) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (probeSocks()) {
-                status.value = "ready"
+            if (socksPort <= 0) socksPort = discoverSocksPort()
+            readBootstrapPhase()?.let { (percent, summary) ->
+                bootstrapPercent.value = percent
+                if (summary.isNotBlank()) status.value = summary
+            }
+            if (socksPort > 0 && probeSocks()) {
                 bootstrapPercent.value = 100
+                status.value = "Connected"
                 return@withContext
             }
-            Thread.sleep(1000)
-            if (bootstrapPercent.value < 95) bootstrapPercent.value += 2
+            Thread.sleep(700)
         }
-        error("tor did not start in time")
+        error("Tor did not finish starting — check the phone's connection")
+    }
+
+    /** The service picks its own port; ask rather than guessing 9050. */
+    private fun discoverSocksPort(): Int {
+        TorService.socksPort.takeIf { it > 0 }?.let { return it }
+        val info = runCatching { control?.getInfo("net/listeners/socks") }.getOrNull()
+        Regex(":(\\d+)").find(info ?: "")?.groupValues?.get(1)?.toIntOrNull()
+            ?.let { return it }
+        return 0
+    }
+
+    /** Real progress, straight from Tor's own status. */
+    private fun readBootstrapPhase(): Pair<Int, String>? {
+        val line = runCatching {
+            control?.getInfo("status/bootstrap-phase")
+        }.getOrNull() ?: return null
+        val percent = Regex("PROGRESS=(\\d+)").find(line)?.groupValues?.get(1)
+            ?.toIntOrNull() ?: return null
+        val summary = Regex("SUMMARY=\"([^\"]*)\"").find(line)?.groupValues?.get(1) ?: ""
+        return percent to summary
     }
 
     private fun probeSocks(): Boolean = runCatching {
@@ -89,6 +118,7 @@ class TorNet(private val context: Context) {
      */
     suspend fun dial(onion: String, port: Int = 80, stream: String = ""):
             Triple<Socket, InputStream, OutputStream> = withContext(Dispatchers.IO) {
+        check(socksPort > 0) { "Tor is not ready yet" }
         val socket = Socket()
         socket.connect(InetSocketAddress("127.0.0.1", socksPort), 15_000)
         socket.soTimeout = 300_000

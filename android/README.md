@@ -4,6 +4,10 @@ The same encrypted chat as the terminal client, in a mobile app: Tor runs on
 the phone, servers and channels work exactly as they do on the desktop, and
 the wire format is identical — the two talk to each other directly.
 
+**Verified on a real handset** (Nothing Phone, Android 16): Tor bootstraps,
+the app joins a server over Tor, and messages flow both ways between the
+phone and the desktop client.
+
 ## Install it
 
 The app is not on any store. Sideload the APK:

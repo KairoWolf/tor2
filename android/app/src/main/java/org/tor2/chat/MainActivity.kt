@@ -12,7 +12,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import org.torproject.jni.TorService
 
 class MainActivity : AppCompatActivity() {
@@ -29,14 +31,18 @@ class MainActivity : AppCompatActivity() {
 
     private val torConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            // The control connection is what lets the phone publish its own
-            // onion address, so other people can start a chat with it.
             val binder = service as? TorService.LocalBinder ?: return
-            val torService = binder.service
-            vm.tor.socksPort = torService.socksPort.takeIf { it > 0 } ?: TorService.socksPort
-            runCatching { torService.torControlConnection }
-                .getOrNull()?.let { vm.tor.attachControl(it) }
-            vm.onTorServiceReady()
+            // Reading the control connection and the port both block, and this
+            // callback runs on the main thread — doing it here froze the app.
+            lifecycleScope.launch(Dispatchers.IO) {
+                val torService = binder.service
+                runCatching { torService.torControlConnection }
+                    .getOrNull()?.let { vm.tor.attachControl(it) }
+                val port = runCatching { torService.socksPort }.getOrDefault(0)
+                    .takeIf { it > 0 } ?: TorService.socksPort
+                if (port > 0) vm.tor.socksPort = port
+                vm.onTorServiceReady()
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {}
@@ -47,9 +53,13 @@ class MainActivity : AppCompatActivity() {
         enableEdgeToEdge()
         vm.attachPickers(::launchImagePicker, ::launchMediaPicker)
 
-        // Tor runs in its own service so it survives the screen turning off
+        // Bind rather than startForegroundService: Android requires a
+        // foreground service to call startForeground() within a few seconds,
+        // and TorService does not always manage it — the system then kills the
+        // app with "did not then call Service.startForeground()". A bound
+        // service runs for as long as we are bound to it, with no such
+        // contract.
         val intent = Intent(this, TorService::class.java)
-        ContextCompat.startForegroundService(this, intent)
         bindService(intent, torConnection, Context.BIND_AUTO_CREATE)
 
         setContent {
