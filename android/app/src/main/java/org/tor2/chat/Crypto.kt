@@ -96,6 +96,16 @@ object Crypto {
         return out
     }
 
+    /** BLAKE2b-256 with no personalisation, as hashlib.blake2b defaults to. */
+    fun blake2bPersonalRaw(input: ByteArray, outLen: Int = 32): ByteArray {
+        val out = ByteArray(outLen)
+        val rc = sodium.getSodium().crypto_generichash_blake2b_salt_personal(
+            out, outLen, input, input.size.toLong(), null, 0,
+            ByteArray(16), ByteArray(16))
+        if (rc != 0) error("blake2b failed")
+        return out
+    }
+
     fun sha256(vararg parts: ByteArray): ByteArray {
         val md = MessageDigest.getInstance("SHA-256")
         parts.forEach { md.update(it) }

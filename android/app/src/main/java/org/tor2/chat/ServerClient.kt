@@ -52,7 +52,7 @@ class ServerClient(
         var got: Long = 0,
     )
 
-    suspend fun connect(invite: String = "") {
+    suspend fun connect(invite: String = "", joinCode: String = "") {
         manualClose = false
         state.value = ConnState.Connecting
         try {
@@ -72,6 +72,7 @@ class ServerClient(
                 put("t", "auth")
                 put("nick", nick)
                 put("invite", invite)
+                put("code", joinCode)
                 put("token", saved.token)
             })
             loop = scope.launch { receiveLoop(s) }

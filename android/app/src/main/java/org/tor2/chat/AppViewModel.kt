@@ -155,6 +155,68 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         connect(saved, invite)
     }
 
+    /** Join with eight digits and nothing else. */
+    fun joinWithCode(code: String, label: String = "") {
+        val digits = code.filter { it.isDigit() }
+        if (digits.length != 8) {
+            banner.value = "A server code is 8 digits"
+            return
+        }
+        val onion = runCatching { Codes.serverAddress(digits) }.getOrNull()
+        if (onion == null) {
+            banner.value = "Could not work out an address for that code"
+            return
+        }
+        val key = label.ifBlank { "server-$digits" }
+        val saved = SavedServer(key, onion, "", label.ifBlank { "Server $digits" })
+        store.saveServer(saved)
+        savedServers.value = store.servers()
+        openChat.value = null
+        current.value?.disconnect()
+        val client = ServerClient(tor, viewModelScope, store, nick.value, saved)
+        current.value = client
+        viewModelScope.launch { client.connect(joinCode = digits) }
+    }
+
+    /** Pair a direct chat with five digits. */
+    fun chatWithCode(code: String) {
+        val digits = code.filter { it.isDigit() }
+        if (digits.length != 5) {
+            banner.value = "A chat code is 5 digits"
+            return
+        }
+        val onion = runCatching { Codes.chatAddress(digits) }.getOrNull()
+        if (onion == null) {
+            banner.value = "Could not work out an address for that code"
+            return
+        }
+        startChat(onion, "")
+    }
+
+    /** Publish a 5-digit code others can use to reach this phone. */
+    fun createChatCode() {
+        val server = inbound ?: return
+        val digits = "%05d".format(java.security.SecureRandom().nextInt(100_000))
+        viewModelScope.launch {
+            val addr = tor.publishCodeOnion(digits, server.port, Codes.CHAT_PERSON)
+            if (addr == null) {
+                banner.value = "Could not publish a code"
+            } else {
+                pairingCode.value = digits
+                banner.value = null
+            }
+        }
+    }
+
+    val pairingCode = MutableStateFlow<String?>(null)
+
+    fun clearChatCode() {
+        pairingCode.value?.let { code ->
+            viewModelScope.launch { tor.unpublishCode(code) }
+        }
+        pairingCode.value = null
+    }
+
     fun open(saved: SavedServer) = connect(saved, "")
 
     private fun connect(saved: SavedServer, invite: String) {

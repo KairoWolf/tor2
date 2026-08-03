@@ -105,6 +105,35 @@ class TorNet(private val context: Context) {
             Pair("$id.onion", priv)
         }
 
+    /** Publish the address a short code derives, so the digits reach us. */
+    suspend fun publishCodeOnion(code: String, localPort: Int, person: String):
+            String? = withContext(Dispatchers.IO) {
+        val conn = control ?: return@withContext null
+        val (expanded, pub) = Codes.keyFor(code, person)
+        val blob = "ED25519-V3:" + android.util.Base64.encodeToString(
+            expanded, android.util.Base64.NO_WRAP)
+        val ports = HashMap<Int, String>()
+        ports[80] = "127.0.0.1:$localPort"
+        val reply = runCatching { conn.addOnion(blob, ports, null) }.getOrNull()
+            ?: return@withContext null
+        val id = reply["ServiceID"] ?: return@withContext null
+        codeServices[code] = id
+        val expected = Codes.onionFor(pub).removeSuffix(".onion")
+        if (id != expected) {          // sanity: our maths must match tor's
+            runCatching { conn.delOnion(id) }
+            codeServices.remove(code)
+            return@withContext null
+        }
+        "$id.onion"
+    }
+
+    suspend fun unpublishCode(code: String) = withContext(Dispatchers.IO) {
+        codeServices.remove(code)?.let { runCatching { control?.delOnion(it) } }
+        Unit
+    }
+
+    private val codeServices = mutableMapOf<String, String>()
+
     fun unpublishOnion() {
         val id = serviceId ?: return
         runCatching { control?.delOnion(id) }

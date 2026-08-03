@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -29,6 +30,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -300,8 +302,13 @@ fun StartChatSheet(vm: AppViewModel, onClose: () -> Unit) {
     var label by remember { mutableStateOf("") }
     val clipboard = LocalClipboardManager.current
 
+    val pairing by vm.pairingCode.collectAsState()
+    var theirCode by remember { mutableStateOf("") }
+
     ModalBottomSheet(onDismissRequest = onClose) {
-        Column(Modifier.padding(22.dp).navigationBarsPadding()) {
+        Column(Modifier.padding(22.dp)
+                   .verticalScroll(androidx.compose.foundation.rememberScrollState())
+                   .navigationBarsPadding()) {
             Text("Direct chat", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(4.dp))
             Text("Just the two of you — no server involved, and nobody else can " +
@@ -309,6 +316,53 @@ fun StartChatSheet(vm: AppViewModel, onClose: () -> Unit) {
                  color = MaterialTheme.colorScheme.onSurfaceVariant)
 
             Spacer(Modifier.height(18.dp))
+            Text("Pair with a code", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Text("Five digits, easier than reading out an address.",
+                 style = MaterialTheme.typography.labelSmall,
+                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+
+            AnimatedVisibility(pairing != null, enter = fadeIn() + expandVertically(),
+                               exit = fadeOut() + shrinkVertically()) {
+                Surface(color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(14.dp),
+                           horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(pairing.orEmpty(),
+                             style = MaterialTheme.typography.titleLarge,
+                             color = MaterialTheme.colorScheme.onPrimaryContainer)
+                        Text("Read this to them — they type it to reach you",
+                             style = MaterialTheme.typography.labelSmall,
+                             color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (pairing == null) {
+                    Button(onClick = { vm.createChatCode() }) { Text("Get a code") }
+                } else {
+                    OutlinedButton(onClick = { vm.clearChatCode() }) { Text("Stop") }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = theirCode,
+                    onValueChange = { theirCode = it.filter(Char::isDigit).take(5) },
+                    label = { Text("Their code") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = { vm.chatWithCode(theirCode); onClose() },
+                       enabled = theirCode.length == 5) { Text("Connect") }
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 16.dp))
             Text("Your address", style = MaterialTheme.typography.titleMedium)
             Surface(color = MaterialTheme.colorScheme.surfaceVariant,
                     shape = RoundedCornerShape(10.dp),

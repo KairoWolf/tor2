@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -25,6 +26,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
@@ -370,37 +372,69 @@ private fun UnreadBadge(ch: Channel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun JoinSheet(vm: AppViewModel, onClose: () -> Unit) {
+    var code by remember { mutableStateOf("") }
     var address by remember { mutableStateOf("") }
     var invite by remember { mutableStateOf("") }
     var label by remember { mutableStateOf("") }
+    var manual by remember { mutableStateOf(false) }
+
     ModalBottomSheet(onDismissRequest = onClose) {
-        Column(Modifier.padding(22.dp).navigationBarsPadding()) {
+        Column(Modifier.padding(22.dp).verticalScroll(rememberScrollState())
+                   .navigationBarsPadding()) {
             Text("Join a server", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(6.dp))
-            Text("Paste the address and the invite code you were given.",
+            Text("Ask an admin for a join code — eight digits is all you need.",
                  style = MaterialTheme.typography.bodyMedium,
                  color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(16.dp))
-            OutlinedTextField(address, { address = it },
-                label = { Text("Onion address") },
-                placeholder = { Text("abcd…onion") },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(10.dp))
-            OutlinedTextField(invite, { invite = it },
-                label = { Text("Invite code") },
-                placeholder = { Text("kfpr-2xmq-nwte") },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(10.dp))
-            OutlinedTextField(label, { label = it },
-                label = { Text("Name it (optional)") },
-                singleLine = true, modifier = Modifier.fillMaxWidth())
-            Spacer(Modifier.height(18.dp))
-            Button(
-                onClick = { vm.joinServer(address, invite, label); onClose() },
-                enabled = address.isNotBlank() && invite.isNotBlank(),
+
+            OutlinedTextField(
+                value = code,
+                onValueChange = { code = it.filter(Char::isDigit).take(8) },
+                label = { Text("Join code") },
+                placeholder = { Text("48213902") },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.titleLarge,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Join") }
-            Spacer(Modifier.height(10.dp))
+            )
+            Spacer(Modifier.height(14.dp))
+            Button(
+                onClick = { vm.joinWithCode(code, label); onClose() },
+                enabled = code.length == 8,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Join with code") }
+
+            TextButton(onClick = { manual = !manual }) {
+                Text(if (manual) "Hide the manual way"
+                     else "I only have an address and invite")
+            }
+
+            AnimatedVisibility(manual, enter = expandVertically() + fadeIn(),
+                               exit = shrinkVertically() + fadeOut()) {
+                Column {
+                    OutlinedTextField(address, { address = it },
+                        label = { Text("Onion address") },
+                        placeholder = { Text("abcd…onion") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(invite, { invite = it },
+                        label = { Text("Invite code") },
+                        placeholder = { Text("kfpr-2xmq-nwte") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(label, { label = it },
+                        label = { Text("Name it (optional)") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(14.dp))
+                    OutlinedButton(
+                        onClick = { vm.joinServer(address, invite, label); onClose() },
+                        enabled = address.isNotBlank() && invite.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Join with address") }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
         }
     }
 }

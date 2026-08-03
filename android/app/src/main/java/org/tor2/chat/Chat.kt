@@ -286,7 +286,10 @@ fun MessageRow(
                      style = MaterialTheme.typography.bodyLarge)
             }
             msg.inlineImage?.let { InlineImage(it) }
-            msg.media?.let { MediaCard(it, onPreview, onDownload) }
+            // A still travels with every picture and video, so the chat shows
+            // what something is without anyone tapping download first.
+            msg.media?.takeIf { msg.inlineImage == null }
+                ?.let { MediaCard(it, onPreview, onDownload) }
 
             AnimatedVisibility(showActions && msg.id != null,
                                enter = expandVertically() + fadeIn(),
@@ -352,7 +355,7 @@ private fun MediaCard(info: MediaInfo, onPreview: (Int) -> Unit,
         modifier = Modifier.padding(start = 40.dp, top = 6.dp).fillMaxWidth(0.92f),
     ) {
         Column(Modifier.padding(10.dp)) {
-            info.thumb?.let { InlineThumb(it) }
+            info.thumb?.let { InlineThumb(it, info.kind == "vid") }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(10.dp))
@@ -376,20 +379,30 @@ private fun MediaCard(info: MediaInfo, onPreview: (Int) -> Unit,
 }
 
 @Composable
-private fun InlineThumb(bytes: ByteArray) {
+private fun InlineThumb(bytes: ByteArray, isVideo: Boolean) {
     val bitmap = remember(bytes) {
         runCatching {
             android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         }.getOrNull()
     }
     bitmap?.let {
-        androidx.compose.foundation.Image(
-            bitmap = it.asImageBitmap(),
-            contentDescription = "preview",
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxWidth().height(150.dp)
-                .clip(RoundedCornerShape(8.dp)),
-        )
+        Box(contentAlignment = Alignment.Center) {
+            androidx.compose.foundation.Image(
+                bitmap = it.asImageBitmap(),
+                contentDescription = "preview",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp)
+                    .clip(RoundedCornerShape(8.dp)),
+            )
+            if (isVideo) {
+                Box(Modifier.size(52.dp).clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.5f)),
+                    contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.PlayArrow, "play", tint = Color.White,
+                         modifier = Modifier.size(30.dp))
+                }
+            }
+        }
         Spacer(Modifier.height(8.dp))
     }
 }

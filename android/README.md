@@ -27,8 +27,13 @@ adb install -r dist/tor2-0.1.0.apk
 ## Use it
 
 Tor starts by itself when the app opens; the first connection takes 30–60
-seconds. Then tap **Join a server**, paste the onion address and an invite
-code, and you are in. Your membership is saved, so it reconnects on its own
+seconds. Then tap **Join a server** and type the **8-digit code** an admin
+gave you — that is the whole invitation, no address needed. (Pasting an
+address and invite still works, under "I only have an address and invite".)
+
+For a one-to-one chat, tap **Start a direct chat**: either **Get a code** and
+read the five digits to the other person, or type theirs. Codes beat reading
+out a 56-character address. Your membership is saved, so it reconnects on its own
 afterwards — including when a Tor circuit dies.
 
 - Swipe from the left, or tap the menu, for servers and channels.
@@ -103,7 +108,6 @@ than having to go back to whoever set the server up.
 - Multi-circuit parallel transfers are implemented (`Parallel.kt`, tested) but
   are not yet switched on for uploads from the phone.
 - Server administration: use the desktop client for `/ban`, `/promote`,
-  channels and invites.
-- Pairing codes (`/code` and `/join` on the desktop).
+  channels and minting join codes.
 
 Lawful use only — see the main README.
