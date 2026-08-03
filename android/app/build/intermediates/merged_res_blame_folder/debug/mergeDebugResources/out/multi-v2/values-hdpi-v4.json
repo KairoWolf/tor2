@@ -1,0 +1,20 @@
+{
+    "logs": [
+        {
+            "outputFile": "org.tor2.chat.app-mergeDebugResources-52:/values-hdpi-v4/values-hdpi-v4.xml",
+            "map": [
+                {
+                    "source": "/home/jonas/.gradle/caches/8.11.1/transforms/441a82e2653e4b7711a796d4a5b02291/transformed/appcompat-1.7.0/res/values-hdpi-v4/values-hdpi-v4.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endLines": "6",
+                        "endColumns": "13",
+                        "endOffsets": "327"
+                    }
+                }
+            ]
+        }
+    ]
+}

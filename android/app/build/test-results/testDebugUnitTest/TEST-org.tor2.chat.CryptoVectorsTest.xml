@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.tor2.chat.CryptoVectorsTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-08-03T03:54:14" hostname="KairoPC" time="0.059">
+  <properties/>
+  <testcase name="x25519 shared secret matches PyNaCl" classname="org.tor2.chat.CryptoVectorsTest" time="0.054"/>
+  <testcase name="inner layer key matches hashlib blake2b with personalisation" classname="org.tor2.chat.CryptoVectorsTest" time="0.002"/>
+  <testcase name="session fingerprint matches the desktop client" classname="org.tor2.chat.CryptoVectorsTest" time="0.002"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[SLF4J: No SLF4J providers were found.
+SLF4J: Defaulting to no-operation (NOP) logger implementation
+SLF4J: See https://www.slf4j.org/codes.html#noProviders for further details.
+]]></system-err>
+</testsuite>
