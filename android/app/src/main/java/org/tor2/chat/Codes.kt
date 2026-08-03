@@ -28,8 +28,8 @@ object Codes {
     /** The v3 onion address for a public key. */
     fun onionFor(pub: ByteArray): String {
         val version = byteArrayOf(3)
-        val checksum = MessageDigest.getInstance("SHA3-256")
-            .digest(".onion checksum".toByteArray() + pub + version)
+        // Android has no SHA3-256, so this is our own — see Sha3.
+        val checksum = Sha3.digest(".onion checksum".toByteArray() + pub + version)
             .copyOfRange(0, 2)
         val encoded = base32(pub + checksum + version)
         return encoded.lowercase() + ".onion"
