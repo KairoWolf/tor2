@@ -31,8 +31,14 @@ SETTINGS = {
     "theme": ("Theme", "choice", "dark",
               "Colour scheme", ["dark", "light", "midnight", "high-contrast"]),
     "compress_quality": ("Video quality", "choice", "balanced",
-                         "Higher quality means slower uploads",
+                         "Higher quality means bigger, slower uploads",
                          ["small", "balanced", "high"]),
+    "video_codec": ("Video codec", "choice", "h264",
+                    "h265 files are about 22% smaller but take ~3x longer to "
+                    "encode and need a recent player",
+                    ["h264", "h265"]),
+    "shrink_images": ("Shrink images before sending", "bool", True,
+                      "Re-encode large PNGs to WebP — often 80% smaller"),
     "parallel_streams": ("Parallel transfer streams", "choice", "4",
                          "More streams use more Tor circuits — faster, but "
                          "heavier on the network", ["1", "2", "4", "8"]),
@@ -41,7 +47,14 @@ SETTINGS = {
 }
 
 PREVIEW_WIDTHS = {"small": 40, "medium": 60, "large": 90}
-CRF = {"small": "32", "balanced": "28", "high": "23"}
+CRF = {
+    "libx264": {"small": "32", "balanced": "28", "high": "23"},
+    "libx265": {"small": "34", "balanced": "30", "high": "25"},
+}
+
+
+def crf_for(encoder: str, quality: str) -> str:
+    return CRF.get(encoder, CRF["libx264"]).get(quality, "28")
 
 
 def load() -> dict:

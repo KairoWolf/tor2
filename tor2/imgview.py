@@ -11,6 +11,9 @@ from rich.text import Text
 
 PREVIEW_WIDTH = 60          # character cells
 MAX_PREVIEW_WIDTH = 120
+MAX_ROWS = 20               # terminal rows an inline preview may occupy
+ANIM_WIDTH = 40             # animations are smaller: they sit in a pane
+ANIM_ROWS = 10
 GIF_MAX_FRAMES = 60         # cap so a huge gif can't eat memory
 SUPPORTED = {"png", "jpeg", "gif", "webp", "bmp"}
 
@@ -40,11 +43,17 @@ def is_animated(data: bytes) -> bool:
         return False
 
 
-def _to_text(img: Image.Image, width: int) -> Text:
+def _to_text(img: Image.Image, width: int, max_rows: int = MAX_ROWS) -> Text:
     img = img.convert("RGB")
     aspect = img.height / img.width
     w = max(4, min(width, MAX_PREVIEW_WIDTH))
     h = max(2, round(w * aspect))
+    # A portrait picture would otherwise fill the whole window; shrink to fit
+    # the row budget and keep the proportions.
+    if h > max_rows * 2:
+        scale = (max_rows * 2) / h
+        w = max(4, int(w * scale))
+        h = max_rows * 2
     h += h % 2                       # even rows so pixel pairs line up
     img = img.resize((w, h), Image.LANCZOS)
     px = img.load()
@@ -60,14 +69,15 @@ def _to_text(img: Image.Image, width: int) -> Text:
     return text
 
 
-def render_preview(data: bytes, width: int = PREVIEW_WIDTH) -> Text:
+def render_preview(data: bytes, width: int = PREVIEW_WIDTH,
+                   max_rows: int = MAX_ROWS) -> Text:
     """Render the image (first frame, if animated) as colored half-blocks."""
     with Image.open(io.BytesIO(data)) as src:
-        return _to_text(src, width)
+        return _to_text(src, width, max_rows)
 
 
-def render_frames(data: bytes, width: int = PREVIEW_WIDTH
-                  ) -> tuple[list[Text], float]:
+def render_frames(data: bytes, width: int = ANIM_WIDTH,
+                  max_rows: int = ANIM_ROWS) -> tuple[list[Text], float]:
     """Render every frame of an animation. Returns (frames, seconds_per_frame)."""
     frames: list[Text] = []
     delay_ms = 100
@@ -77,6 +87,6 @@ def render_frames(data: bytes, width: int = PREVIEW_WIDTH
                 break
             if i == 0:
                 delay_ms = frame.info.get("duration", 100) or 100
-            frames.append(_to_text(frame, width))
+            frames.append(_to_text(frame, width, max_rows))
     # Terminals cannot keep up with 10ms frames, and some gifs claim 0.
     return frames, max(0.05, delay_ms / 1000)

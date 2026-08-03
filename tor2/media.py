@@ -17,12 +17,16 @@ READ_SIZE = 1024 * 1024
 DISK_HEADROOM = 200 * 1024 * 1024   # never fill a disk to the last byte
 
 
-def sha256_file(path: Path) -> str:
+def sha256_file(path: Path, on_progress=None) -> str:
     """Blocking: hash a file without loading it. Run in a thread."""
     h = hashlib.sha256()
+    done = 0
     with path.open("rb") as f:
         while chunk := f.read(READ_SIZE):
             h.update(chunk)
+            done += len(chunk)
+            if on_progress:
+                on_progress(done)
     return h.hexdigest()
 
 
@@ -183,3 +187,118 @@ class MediaCache:
 
     def clear(self) -> None:
         self._items.clear()
+
+
+class ChunkPlan:
+    """A shared queue of byte ranges for several circuits to work through.
+
+    Tor circuits differ wildly in speed. Splitting a file into equal shares
+    means the transfer ends when the *slowest* circuit finishes its share
+    while the fast ones idle. Handing out small pieces on demand keeps every
+    circuit busy until the last byte, so one bad relay costs one piece rather
+    than a quarter of the file.
+    """
+
+    def __init__(self, size: int, piece: int, done_ranges=None):
+        self.size = size
+        self.piece = piece
+        self.pieces: list[tuple[int, int]] = []
+        have = sorted(done_ranges or [])
+        pos = 0
+        for start, end in have:                # skip what a resume already has
+            while pos < min(start, size):
+                nxt = min(pos + piece, start, size)
+                self.pieces.append((pos, nxt))
+                pos = nxt
+            pos = max(pos, end)
+        while pos < size:
+            nxt = min(pos + piece, size)
+            self.pieces.append((pos, nxt))
+            pos = nxt
+        self._next = 0
+        self.remaining = sum(b - a for a, b in self.pieces)
+
+    def take(self) -> tuple[int, int] | None:
+        if self._next >= len(self.pieces):
+            return None
+        p = self.pieces[self._next]
+        self._next += 1
+        return p
+
+    def give_back(self, piece: tuple[int, int]) -> None:
+        """A circuit died mid-piece; let another one pick it up."""
+        self.pieces.append(piece)
+
+    @property
+    def empty(self) -> bool:
+        return self._next >= len(self.pieces)
+
+
+async def send_pieces(session, path: Path, chunk_type: str, plan: ChunkPlan,
+                      on_bytes=None, keep_going=None) -> None:
+    """Pull ranges off the shared plan until it is empty."""
+    with path.open("rb") as f:
+        while True:
+            piece = plan.take()
+            if piece is None:
+                return
+            start, end = piece
+            try:
+                f.seek(start)
+                pos = start
+                while pos < end:
+                    if keep_going is not None and not keep_going():
+                        raise ConnectionError("transfer aborted")
+                    data = f.read(min(READ_SIZE, end - pos))
+                    if not data:
+                        break
+                    await session.send_binary({"t": chunk_type, "off": pos}, data)
+                    pos += len(data)
+                    if on_bytes:
+                        on_bytes(len(data))
+            except Exception:
+                plan.give_back((pos, end) if pos < end else (start, end))
+                raise
+
+
+class RangeSet:
+    """Byte ranges already received, so an interrupted transfer can resume."""
+
+    def __init__(self):
+        self.ranges: list[list[int]] = []
+
+    def add(self, start: int, length: int) -> None:
+        end = start + length
+        merged = []
+        placed = False
+        for a, b in self.ranges:
+            if b < start - 0 or a > end:
+                merged.append([a, b])
+                continue
+            start, end = min(a, start), max(b, end)
+        merged.append([start, end])
+        merged.sort()
+        out: list[list[int]] = []
+        for a, b in merged:
+            if out and a <= out[-1][1]:
+                out[-1][1] = max(out[-1][1], b)
+            else:
+                out.append([a, b])
+        self.ranges = out
+
+    @property
+    def total(self) -> int:
+        return sum(b - a for a, b in self.ranges)
+
+    def missing(self, size: int) -> list[tuple[int, int]]:
+        gaps, pos = [], 0
+        for a, b in self.ranges:
+            if a > pos:
+                gaps.append((pos, min(a, size)))
+            pos = max(pos, b)
+        if pos < size:
+            gaps.append((pos, size))
+        return gaps
+
+    def as_list(self) -> list[tuple[int, int]]:
+        return [(a, b) for a, b in self.ranges]

@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS media(
     sha256 TEXT NOT NULL,
     path TEXT NOT NULL,
     created REAL NOT NULL,
-    thumb BLOB);
+    thumb BLOB,
+    name BLOB);
 CREATE TABLE IF NOT EXISTS messages(
     id INTEGER PRIMARY KEY,
     channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
@@ -126,6 +127,8 @@ class ServerDB:
         have = {r["name"] for r in self.db.execute("PRAGMA table_info(media)")}
         if "thumb" not in have:
             self.db.execute("ALTER TABLE media ADD COLUMN thumb BLOB")
+        if "name" not in have:
+            self.db.execute("ALTER TABLE media ADD COLUMN name BLOB")
 
     # ---------- meta ----------
 
@@ -337,6 +340,12 @@ class ServerDB:
         self._evict_media()
         return mid
 
+    def set_name(self, media_id: int, name: str | None) -> None:
+        if name:
+            self.db.execute("UPDATE media SET name=? WHERE id=?",
+                            (self.vault.seal(name), media_id))
+            self.db.commit()
+
     def set_thumb(self, media_id: int, thumb: bytes | None) -> None:
         if thumb:
             if self.vault.enabled:
@@ -383,6 +392,11 @@ class ServerDB:
             return None
         info = {"id": r["id"], "kind": r["kind"], "ext": r["ext"],
                 "size": r["size"], "sha256": r["sha256"]}
+        try:
+            if r["name"]:
+                info["name"] = self.vault.open(r["name"])
+        except (IndexError, KeyError):
+            pass
         if r["thumb"]:
             raw = bytes(r["thumb"])
             if raw[:4] == MEDIA_MAGIC and getattr(self.vault, "box", None):

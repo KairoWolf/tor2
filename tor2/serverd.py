@@ -350,8 +350,11 @@ class Tor2Server:
                     thumb = None
             except (binascii.Error, ValueError):
                 thumb = None
+        # A sender-supplied name is a display label only — it never touches
+        # any path we open.
+        name = re.sub(r"[^\w .\-()\[\]]", "", str(msg.get("name", ""))[:80]).strip()
         c.upload = {"kind": kind, "ext": ext, "chan": chan, "sink": sink,
-                    "thumb": thumb}
+                    "thumb": thumb, "name": name}
         # shared by member id so extra circuits can feed the same upload
         self.uploads[c.member_id] = c.upload
         if size > proto.MAX_VIDEO_BYTES:
@@ -402,6 +405,8 @@ class Tor2Server:
             return
         if up.get("thumb"):
             self.db.set_thumb(mid, up["thumb"])
+        if up.get("name"):
+            self.db.set_name(mid, up["name"])
         stored = self.db.add_message(up["chan"], c.member_id, c.nick, None, mid)
         # Images are small enough to push to everyone; videos are announced and
         # fetched on demand so one upload doesn't flood every Tor circuit.
@@ -421,6 +426,16 @@ class Tor2Server:
         path = self.db.media_path(mid) if info else None
         if not info or path is None or not path.is_file():
             c.enqueue({"t": "srverr", "msg": f"no media #{mid}"})
+            return
+        if msg.get("thumb"):
+            # /preview: a still costs a few KB instead of the whole file
+            if info.get("thumb"):
+                c.enqueue({"t": "mthumb", "id": mid, "kind": info["kind"],
+                           "name": info.get("name", ""),
+                           "size": info["size"], "thumb": info["thumb"]})
+            else:
+                c.enqueue({"t": "srverr",
+                           "msg": f"no preview stored for #{mid} — /get {mid}"})
             return
         # Read from disk as we go: a 3 GB download must not be materialized.
         chunk_size = proto.chunk_size_for(info["size"])

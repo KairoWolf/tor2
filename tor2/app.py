@@ -89,7 +89,7 @@ class Tor2App(ServerModeMixin, App):
     #preview {
         dock: bottom;
         height: auto;
-        max-height: 26;
+        max-height: 12;
         padding: 0 1;
         border: round $success;
         display: none;
@@ -358,6 +358,16 @@ class Tor2App(ServerModeMixin, App):
         cfg = getattr(self, "opts", None) or settings.load()
         return settings.PREVIEW_WIDTHS.get(str(cfg.get("preview_size", "medium")), 60)
 
+    def preview_rows(self) -> int:
+        """Never let one picture push the conversation off the screen."""
+        cfg = getattr(self, "opts", None) or settings.load()
+        by_size = {"small": 12, "medium": 20, "large": 28}
+        cap = by_size.get(str(cfg.get("preview_size", "medium")), 20)
+        try:
+            return max(6, min(cap, self.size.height // 2))
+        except Exception:
+            return cap
+
     # ---------- progress ----------
 
     def progress(self, label: str, fraction: float, detail: str = "") -> None:
@@ -411,7 +421,8 @@ class Tor2App(ServerModeMixin, App):
             self.sys_msg("(previews are off — /settings to enable)", "bright_black")
             return
         try:
-            self.chat.write(render_preview(data, width=self.preview_width()))
+            self.chat.write(render_preview(data, width=self.preview_width(),
+                                           max_rows=self.preview_rows()))
         except Exception as e:
             self.sys_msg(f"could not render preview: {e}", "red")
             return
@@ -462,18 +473,68 @@ class Tor2App(ServerModeMixin, App):
         except Exception:
             pass
 
+    AUDIO_PLAYERS = [("ffplay", ["-nodisp", "-autoexit", "-loglevel", "quiet"]),
+                     ("mpv", ["--no-video", "--really-quiet"]),
+                     ("afplay", []), ("paplay", []), ("aplay", ["-q"])]
+
     async def cmd_play(self, arg: str) -> None:
-        """/play [id] — replay an animation from the preview cache."""
-        key = arg.strip() or self.cache.last_key
+        """/play [id|file] — replay an animation, or listen to audio."""
+        target = arg.strip()
+
+        # a path, or the newest received audio file, plays through the speakers
+        path = Path(target).expanduser() if target else None
+        if path is not None and path.is_file():
+            await self.play_audio(path)
+            return
+        if not target:
+            recent = sorted(RECEIVED_DIR.glob("aud_*"), reverse=True) \
+                if RECEIVED_DIR.is_dir() else []
+            if recent and not self.cache.last_key:
+                await self.play_audio(recent[0])
+                return
+
+        key = target or self.cache.last_key
         if not key:
-            self.sys_msg("nothing to play yet", "red")
+            self.sys_msg("nothing to play — /play <id> or /play <file>", "red")
             return
         got = self.cache.get(key)
         if got is None:
-            self.sys_msg(f"image {key} is not in the preview cache — "
+            match = sorted(RECEIVED_DIR.glob(f"aud_{int(key):03d}.*")) \
+                if key.isdigit() and RECEIVED_DIR.is_dir() else []
+            if match:
+                await self.play_audio(match[0])
+                return
+            self.sys_msg(f"{key} is not in the preview cache — "
                          f"/get {key} downloads it", "red")
             return
         await self.animate(got[0])
+
+    async def play_audio(self, path: Path) -> None:
+        """Play a sound file with whatever player the system has."""
+        import shutil as _sh
+        for exe, args in self.AUDIO_PLAYERS:
+            if _sh.which(exe):
+                self.sys_msg(f"playing {path.name} (ctrl+q stops tor2, "
+                             f"the sound stops with it)", "green")
+                try:
+                    self._player = await asyncio.create_subprocess_exec(
+                        exe, *args, str(path),
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL)
+                except Exception as e:
+                    self.sys_msg(f"could not start {exe}: {e}", "red")
+                return
+        self.sys_msg("no audio player found — install ffmpeg (ffplay) or mpv",
+                     "red")
+
+    def stop_audio(self) -> None:
+        proc = getattr(self, "_player", None)
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        self._player = None
 
     def cmd_save(self, arg: str) -> None:
         """/save [id] — write a previewed image to ./received."""
@@ -806,7 +867,9 @@ class Tor2App(ServerModeMixin, App):
         # Previewed, not written to disk: /save decides what is kept.
         key = f"dm{len(self.cache._items) + 1}"
         self.cache.put(key, data, fmt)
-        self.sys_msg(f"{self.peer_nick} sent an image ({fmt_size(len(data))})",
+        label = str(msg.get("name", ""))[:80] or "image"
+        label = re.sub(r"[^\w .\-()\[\]]", "", label)
+        self.sys_msg(f"{self.peer_nick} sent {label} ({fmt_size(len(data))})",
                      "magenta")
         self.show_preview(data, "/save writes it to ./received")
 
@@ -909,6 +972,7 @@ class Tor2App(ServerModeMixin, App):
             self.sys_msg(f"no such file: {path}", "red")
             return
         data = path.read_bytes()
+        data = self.maybe_shrink(data, path.name)
         if len(data) > proto.MAX_IMAGE_BYTES:
             self.sys_msg("image too large (5 MB max) — try /vid for videos", "red")
             return
@@ -919,7 +983,8 @@ class Tor2App(ServerModeMixin, App):
             return
         self.start_transfer("sending image", len(data))
         self.progress("sending image", 0.5)
-        await self.session.send({"t": "img", "data": base64.b64encode(data).decode()})
+        await self.session.send({"t": "img", "name": path.name[:80],
+                                 "data": base64.b64encode(data).decode()})
         self.progress_done()
         self.chat.write(render_preview(data))
         self.sys_msg(f"image sent ({len(data) // 1024} KB)", "green")
@@ -945,8 +1010,14 @@ class Tor2App(ServerModeMixin, App):
             self.sys_msg(f"sending video: {fmt_size(size)} "
                          f"(tor is slow — this can take a while)")
             self.start_transfer("sending video", size)
-            self.progress("sending video", 0.0, "checksumming…")
-            sha = await asyncio.to_thread(media.sha256_file, payload)
+
+            def hash_note(done: int) -> None:
+                self.call_from_thread(
+                    self.progress, "preparing", done / max(1, size),
+                    f"checksumming {fmt_size(done)}/{fmt_size(size)}")
+
+            sha = await asyncio.to_thread(media.sha256_file, payload, hash_note)
+            self.start_transfer("sending video", size)
             await media.send_file(
                 self.session, payload, {"t": "vmeta"}, "vchunk",
                 proto.chunk_size_for(size), sha,
@@ -971,6 +1042,21 @@ class Tor2App(ServerModeMixin, App):
             self.chat.write(render_preview(thumb, width=44))
         except Exception:
             pass
+
+    def maybe_shrink(self, data: bytes, name: str = "") -> bytes:
+        """Re-encode a big picture to WebP when that is much smaller."""
+        cfg = getattr(self, "opts", None) or settings.load()
+        if not cfg.get("shrink_images", True):
+            return data
+        got = video.recode_image(data)
+        if not got:
+            return data
+        smaller, _ = got
+        self.sys_msg(f"shrank {name or 'image'} {fmt_size(len(data))} → "
+                     f"{fmt_size(len(smaller))} "
+                     f"({100 - 100 * len(smaller) // len(data)}% smaller)",
+                     "bright_black")
+        return smaller
 
     async def prepare_audio(self, src: Path):
         """Probe and transcode audio to mp3. Returns (path, tmpdir) or None."""
@@ -1060,9 +1146,13 @@ class Tor2App(ServerModeMixin, App):
         def on_progress(fraction: float) -> None:
             self.call_from_thread(self.progress, "compressing", fraction)
 
+        cfg = getattr(self, "opts", None) or settings.load()
+        codec = str(cfg.get("video_codec", "h264"))
+        encoder = video.best_video_codec(codec)[0]
+        crf = settings.crf_for(encoder, str(cfg.get("compress_quality", "balanced")))
         try:
             await asyncio.to_thread(video.compress, src, out, on_progress,
-                                    info["duration"])
+                                    info["duration"], codec, crf)
         except Exception as e:
             self.progress_done()
             self.sys_msg(str(e), "red")
@@ -1088,7 +1178,7 @@ class Tor2App(ServerModeMixin, App):
     SERVER_ONLY = {
         "/ch", "/channel", "/channels", "/members", "/more", "/del", "/delete",
         "/leave", "/get", "/mkchan", "/rmchan", "/kick", "/ban", "/unban",
-        "/bans", "/promote", "/demote", "/newinvite", "/autoupdate",
+        "/bans", "/promote", "/demote", "/newinvite", "/autoupdate", "/preview",
     }
 
     ALL_COMMANDS = [
@@ -1097,6 +1187,7 @@ class Tor2App(ServerModeMixin, App):
         "/contacts", "/delcontact", "/joinserver", "/server",
         "/ch", "/channels", "/members", "/more", "/del", "/leave",
         "/img", "/vid", "/big-vid", "/audio", "/get", "/save", "/play",
+        "/preview",
         "/mkchan", "/rmchan", "/kick", "/ban", "/unban", "/bans",
         "/promote", "/demote", "/newinvite", "/autoupdate",
     ]
@@ -1283,6 +1374,8 @@ class Tor2App(ServerModeMixin, App):
                 await self.server_fetch(arg)
             case "/more":
                 await self.server_more()
+            case "/preview":
+                await self.server_preview(arg)
             case "/del" | "/delete":
                 await self.server_delete(arg)
             case "/play":
@@ -1314,9 +1407,11 @@ class Tor2App(ServerModeMixin, App):
                     "/big-vid <path>    — post a long video (any length, ≤3 GB)",
                     "/audio <path>      — post music or audio (mp3, ≤200 MB)",
                     "/get <id>          — download a posted image or video",
+                    "/preview <id>      — see a still without downloading it",
                     "/more              — load older messages",
                     "/del <id>          — delete your message (admins: any)",
-                    "/save [id] · /play [id] — keep or replay a previewed image",
+                    "/save [id] · /play [id] — keep an image, replay a gif, or "
+                    "play audio",
                     "/disconnect        — go back to direct-message mode",
                     "/leave             — disconnect and forget this server",
                 ):
@@ -1373,6 +1468,7 @@ class Tor2App(ServerModeMixin, App):
 
     async def action_quit(self) -> None:
         self.manual_disconnect = True
+        self.stop_audio()
         await self.stop_code()
         await self.drop_session()
         if self._server:

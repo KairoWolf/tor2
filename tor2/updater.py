@@ -58,8 +58,15 @@ def check() -> dict:
     remote = _git("remote", "get-url", "origin")
     if REPO_URL_FRAGMENT not in remote:
         raise UpdateError(f"origin is {remote}, not the tor2 repository")
-    if _git("status", "--porcelain"):
-        raise UpdateError("you have local changes — commit or discard them first")
+    # Only *tracked* modifications can block a fast-forward. Untracked files
+    # (pip build artifacts, logs, backups left in the checkout) cannot, and
+    # treating them as blockers made updates impossible on a working server.
+    dirty = _git("status", "--porcelain", "--untracked-files=no")
+    if dirty:
+        files = ", ".join(line[3:] for line in dirty.splitlines()[:5])
+        raise UpdateError(
+            f"these tracked files have local edits: {files} — commit or "
+            "discard them (git checkout -- .) first")
 
     branch = _git("rev-parse", "--abbrev-ref", "HEAD")
     _git("fetch", "--quiet", "origin", branch)

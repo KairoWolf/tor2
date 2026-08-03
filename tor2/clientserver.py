@@ -212,6 +212,8 @@ class ServerModeMixin:
             self.sys_msg(str(msg.get("msg", ""))[:400], "yellow")
         elif kind == "deleted":
             self.srv_deleted(msg)
+        elif kind == "mthumb":
+            self.srv_mthumb(msg)
         elif kind == "mget":
             self.srv_mget(msg)
         elif kind == "mgchunk":
@@ -321,19 +323,23 @@ class ServerModeMixin:
     def drop_pending(self, chan: str, msg: dict) -> bool:
         """Reconcile the server's echo with the copy we drew locally.
 
-        Returns True if this message was already on screen, in which case the
-        local line is upgraded in place with the id the server assigned.
+        The local copy has no id yet, so it is replaced outright by a
+        freshly rendered line — appending the id would put it after the text
+        while everyone else's sits in front.
         """
         pend = self.srv.get("pending") or []
         body = str(msg.get("body", ""))
         for i, (pchan, pbody, line) in enumerate(pend):
             if pchan == chan and pbody == body:
                 pend.pop(i)
-                mid = msg.get("id")
-                if mid is not None and not line.plain.startswith(f"{line.plain[:5]}[{mid}]"):
-                    line.append(f"  [{mid}]", style="bright_black")
-                    if chan == self.srv.get("channel") and self.conv is self.active:
-                        self.redraw_channel()
+                buf = self.srv["buffers"].setdefault(chan, [])
+                try:
+                    idx = next(j for j, l in enumerate(buf) if l is line)
+                except StopIteration:
+                    return True
+                buf[idx] = self.render_event(msg)
+                if chan == self.srv.get("channel") and self.conv is self.active:
+                    self.redraw_channel()
                 return True
         return False
 
@@ -372,8 +378,11 @@ class ServerModeMixin:
         info = m.get("media")
         if info:
             kind = {"img": "image", "aud": "audio"}.get(info.get("kind"), "video")
-            t.append(f"[{kind} · {fmt_size(info.get('size', 0))}] ", style="magenta")
+            label = info.get("name") or kind
+            t.append(f"[{label} · {fmt_size(info.get('size', 0))}] ", style="magenta")
             t.append(f"/get {info.get('id')}", style="bold cyan")
+            if info.get("kind") != "img":
+                t.append(f" · /preview {info.get('id')}", style="cyan")
         else:
             body = str(m.get("body", ""))
             if mentioned:
@@ -400,6 +409,30 @@ class ServerModeMixin:
                           if mid is not None else "/save keeps it")
 
     # ---------- media download ----------
+
+    def srv_mthumb(self, msg: dict) -> None:
+        """A still fetched by /preview — kilobytes instead of the whole file."""
+        try:
+            data = base64.b64decode(msg.get("thumb", ""), validate=True)
+            validate_image(data)
+        except Exception as e:
+            self.sys_msg(f"could not show preview: {e}", "red")
+            return
+        name = msg.get("name") or f"#{msg.get('id')}"
+        self.sys_msg(f"preview of {name} ({fmt_size(int(msg.get('size', 0)))}) "
+                     f"— /get {msg.get('id')} downloads it", "magenta")
+        self.show_preview(data)
+
+    async def server_preview(self, arg: str) -> None:
+        """/preview <id> — look at something without downloading it."""
+        if not self._srv_ready():
+            return
+        try:
+            mid = int(arg.strip())
+        except ValueError:
+            self.sys_msg("usage: /preview <id>", "red")
+            return
+        await self.session.send({"t": "fetch", "id": mid, "thumb": True})
 
     def srv_mget(self, msg: dict) -> None:
         try:
@@ -579,10 +612,18 @@ class ServerModeMixin:
                 self.sys_msg(f"uploading {fmt_size(size)} "
                              "(tor is slow — this can take a while)")
             self.start_transfer("uploading", size)
-            self.progress("uploading", 0.0, "checksumming…")
-            sha = await asyncio.to_thread(media.sha256_file, payload)
+            hashed = {"n": 0}
+
+            def hash_note(done: int) -> None:
+                hashed["n"] = done
+                self.call_from_thread(
+                    self.progress, "preparing", done / max(1, size),
+                    f"checksumming {fmt_size(done)}/{fmt_size(size)}")
+
+            sha = await asyncio.to_thread(media.sha256_file, payload, hash_note)
+            self.start_transfer("uploading", size)
             meta = {"t": "mput", "kind": kind, "ext": ext,
-                    "chan": self.srv["channel"],
+                    "chan": self.srv["channel"], "name": path.name[:80],
                     "thumb": base64.b64encode(thumb).decode() if thumb else None}
             if not await self.parallel_upload(payload, meta, sha, size):
                 await media.send_file(
@@ -677,33 +718,33 @@ class ServerModeMixin:
         # connection
         await self.session.send({**meta, "size": size, "chunks": n_chunks,
                                  "sha256": sha})
-        n = len(sessions) + 1
-        span = size // n
-        bounds = [(i * span, size if i == n - 1 else (i + 1) * span)
-                  for i in range(n)]
+        # Pieces are handed out on demand, so a slow circuit costs one piece
+        # rather than its whole quarter of the file.
+        plan = media.ChunkPlan(size, max(chunk, 1))
         done = 0
-        lock = asyncio.Lock()
 
-        async def push(sess, start, end):
+        def note(k: int) -> None:
             nonlocal done
-            async def note(k: int) -> None:
-                nonlocal done
-                async with lock:
-                    done += k
-                    self.transfer_progress(done)
-            await media.send_file(
-                sess, payload, meta, "mchunk", chunk, sha,
-                announce=False, start=start, end=end,
-                sent_cb=lambda k: self.transfer_progress(min(size, done + k)),
-                keep_going=lambda: self.state == SERVER)
-            async with lock:
-                done += end - start
-                self.transfer_progress(done)
+            done += k
+            self.transfer_progress(done)
+
+        async def push(sess):
+            try:
+                await media.send_pieces(sess, payload, "mchunk", plan,
+                                        on_bytes=note,
+                                        keep_going=lambda: self.state == SERVER)
+            except Exception:
+                return False        # its pieces went back on the queue
+            return True
 
         try:
-            await asyncio.gather(
-                push(self.session, *bounds[0]),
-                *(push(sess, a, b) for sess, (a, b) in zip(sessions, bounds[1:])))
+            results = await asyncio.gather(
+                push(self.session), *(push(sess) for sess in sessions),
+                return_exceptions=True)
+            if not plan.empty:      # every circuit died with work outstanding
+                raise ConnectionError("all circuits failed")
+            if not any(r is True for r in results):
+                raise ConnectionError("no circuit completed")
         except Exception as e:
             self.sys_msg(f"parallel upload failed ({e}) — retrying on one circuit",
                          "yellow")
@@ -737,37 +778,47 @@ class ServerModeMixin:
         if dl is None:
             return False
         sink = dl["sink"]
-        n = len(sessions) + 1
-        span = size // n
-        bounds = [(i * span, size if i == n - 1 else (i + 1) * span)
-                  for i in range(n)]
-        done = 0
+        have = dl.setdefault("have", media.RangeSet())
+        piece = max(proto.chunk_size_for(size), 1) * 2
+        plan = media.ChunkPlan(size, piece, done_ranges=have.as_list())
+        done = have.total
         lock = asyncio.Lock()
 
-        async def pull(sess, start, end):
+        async def pull(sess):
             nonlocal done
-            await sess.send({"t": "fetch", "id": mid, "start": start, "end": end})
             while True:
-                msg = await asyncio.wait_for(sess.recv(), timeout=300)
-                if msg["t"] != "mgchunk":
-                    continue
-                data = msg.get("bin")
-                if data is None:
-                    continue
-                async with lock:
-                    sink.write(data, offset=int(msg.get("off", start)))
-                    done += len(data)
-                    self.transfer_progress(done)
-                start += len(data)
-                if start >= end:
-                    return
+                item = plan.take()
+                if item is None:
+                    return True
+                start, end = item
+                pos = start
+                try:
+                    await sess.send({"t": "fetch", "id": mid,
+                                     "start": start, "end": end})
+                    while pos < end:
+                        msg = await asyncio.wait_for(sess.recv(), timeout=300)
+                        if msg["t"] != "mgchunk":
+                            continue
+                        data = msg.get("bin")
+                        if data is None:
+                            continue
+                        off = int(msg.get("off", pos))
+                        async with lock:
+                            sink.write(data, offset=off)
+                            have.add(off, len(data))
+                            done += len(data)
+                            self.transfer_progress(done)
+                        pos = off + len(data)
+                except Exception:
+                    plan.give_back((pos, end) if pos < end else (start, end))
+                    return False
 
         try:
-            # the main session takes the first slice, the extra circuits the rest
-            tasks = [asyncio.create_task(pull(self.session, *bounds[0]))]
-            for sess, (a, b) in zip(sessions, bounds[1:]):
-                tasks.append(asyncio.create_task(pull(sess, a, b)))
-            await asyncio.gather(*tasks)
+            results = await asyncio.gather(
+                pull(self.session), *(pull(sess) for sess in sessions),
+                return_exceptions=True)
+            if not plan.empty or not any(r is True for r in results):
+                raise ConnectionError("circuits failed with work outstanding")
         except Exception as e:
             self.sys_msg(f"parallel download failed ({e}) — falling back", "yellow")
             return False

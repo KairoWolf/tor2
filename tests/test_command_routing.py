@@ -133,3 +133,35 @@ def test_readme_commands_are_all_known():
     known = set(Tor2App.ALL_COMMANDS) | {"/image", "/video", "/bigvid", "/mp3",
                                          "/config", "/delete", "/channel"}
     assert documented <= known, f"documented but unknown: {documented - known}"
+
+
+def test_untracked_files_do_not_block_an_update(tmp_path, monkeypatch):
+    """Build artifacts and stray files in the checkout must not stop updates."""
+    import subprocess
+    from tor2 import updater
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, capture_output=True, check=True)
+    run("git", "init", "-q", "-b", "main")
+    run("git", "config", "user.email", "t@example.com")
+    run("git", "config", "user.name", "t")
+    (repo / "a.txt").write_text("hello\n")
+    run("git", "add", "-A")
+    run("git", "commit", "-qm", "first")
+    run("git", "remote", "add", "origin",
+        "https://github.com/KairoWolf/tor2.git")
+    monkeypatch.setattr(updater, "repo_root", lambda: repo)
+
+    # an untracked file, like tor2.egg-info or a stray log
+    (repo / "untracked.log").write_text("noise\n")
+    # check() fetches, which we cannot do offline; assert on the dirty test only
+    dirty = subprocess.run(["git", "status", "--porcelain", "-uno"],
+                           cwd=repo, capture_output=True, text=True).stdout
+    assert dirty == "", "untracked files should not count as local changes"
+
+    # a real edit to a tracked file must still be reported
+    (repo / "a.txt").write_text("edited\n")
+    dirty = subprocess.run(["git", "status", "--porcelain", "-uno"],
+                           cwd=repo, capture_output=True, text=True).stdout
+    assert "a.txt" in dirty

@@ -112,7 +112,8 @@ async def main():
         info = updater.check()
         print(f"updater.check: behind={info['behind']} branch={info['branch']}")
     except updater.UpdateError as e:
-        assert "local changes" in str(e) or "not a git" in str(e), e
+        assert ("local edits" in str(e) or "local changes" in str(e)
+                or "not a git" in str(e)), e
         print("updater refuses to update a dirty checkout:", e)
     print("ADMIN TESTS PASSED")
 

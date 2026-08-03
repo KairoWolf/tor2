@@ -59,7 +59,7 @@ SERVER_C2S = {
     "del",        # delete a message you posted (admins: anyone's)
     "mput",       # announce a media upload (kind, size, sha256, chunks)
     "mchunk",     # a chunk of the announced upload
-    "fetch",      # request a stored media blob by id
+    "fetch",      # request a stored media blob by id (thumb=1 for just a still)
     # admin only
     "mkchan", "rmchan", "newinvite", "kick",
     "ban", "unban", "bans", "promote", "demote", "autoupdate",
@@ -71,6 +71,7 @@ SERVER_S2C = {
     "event",      # a chat or media message in a channel
     "histbatch",  # a batch of recent messages
     "members",    # roster / presence update
+    "mthumb",     # a small still for /preview, no full download
     "mget",       # media download header
     "mgchunk",    # a chunk of a media download
     "deleted",    # a message id that is now gone

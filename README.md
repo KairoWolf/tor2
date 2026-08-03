@@ -254,9 +254,10 @@ repository completely.
 | `/vid <path>` | send a video, auto-compressed (up to 10 min) |
 | `/big-vid <path>` | send a long video — any length, up to 3 GB |
 | `/get <id>` | download something posted in a channel |
+| `/preview <id>` | see a still of a video without downloading it |
 | `/save [id]` | keep a previewed image (they aren't saved unless you ask) |
 | `/audio <path>` | send music or a voice recording (converted to mp3) |
-| `/play [id]` | replay an animated GIF |
+| `/play [id\|file]` | replay an animated GIF, or play audio out loud |
 
 Videos are previewed from a still image the sender attaches, so you can see
 what something is before downloading it. Compression and transfers show a
@@ -328,9 +329,17 @@ Transfers use two tricks to make Tor bearable, without weakening anything:
   which is 25% fewer bytes and far less CPU per chunk;
 - large files are **split across several Tor circuits at once** (Tor gives a
   connection its own circuit when its SOCKS credentials differ), so a
-  transfer is not capped by one circuit's bandwidth. Set the number of
-  streams in `/settings`; it falls back to a single circuit automatically if
-  anything goes wrong.
+  transfer is not capped by one circuit's bandwidth;
+- circuits **take work from a shared queue** rather than being handed equal
+  shares, so one slow relay costs a single piece instead of holding up the
+  whole transfer while faster circuits idle;
+- large pictures are **re-encoded to WebP** before sending — typically 80%
+  smaller with no visible loss — and `/settings` offers **H.265** video,
+  measured about 22% smaller than H.264 at matching quality (slower to
+  encode, needs a recent player).
+
+Set the number of streams in `/settings`; anything under 4 MB, or any
+failure, falls back to a single circuit automatically.
 
 **Limitations, honestly:** a live 5-digit code is guessable in principle
 (100,000 options), though a guesser still only reaches your accept prompt.
