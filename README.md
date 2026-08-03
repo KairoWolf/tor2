@@ -147,8 +147,11 @@ systemctl status tor2-server               # root install
 systemctl --user status tor2-server        # user install
 journalctl -u tor2-server -f               # live logs (add --user if applicable)
 
-# mint another invite — works from any directory
-/root/tor2/.venv/bin/tor2-server ~/.local/share/tor2-server --invite
+# these all work from any directory
+SRV="/root/tor2/.venv/bin/tor2-server ~/.local/share/tor2-server"
+$SRV --address      # the server's onion address
+$SRV --info         # address, name, channels, member count
+$SRV --invite       # mint another one-use invite code
 ```
 
 Invite codes are single-use by default. The admin invite printed at install

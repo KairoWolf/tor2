@@ -416,6 +416,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="print a fresh one-use invite code and exit")
     ap.add_argument("--admin-invite", action="store_true",
                     help="print a fresh one-use ADMIN invite code and exit")
+    ap.add_argument("--address", action="store_true",
+                    help="print this server's onion address and exit")
+    ap.add_argument("--info", action="store_true",
+                    help="print address, name, channels and member count, then exit")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
@@ -428,6 +432,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.invite or args.admin_invite:
         db = ServerDB(data_dir)
         print(db.create_invite(uses=1, is_admin=args.admin_invite))
+        db.close()
+        return 0
+
+    if args.address or args.info:
+        db = ServerDB(data_dir)
+        onion = db.get_meta("onion")
+        if not onion:
+            print("no address yet — start the server once so tor can publish it",
+                  file=sys.stderr)
+            db.close()
+            return 1
+        if args.address:
+            print(onion)
+        else:
+            print(f"name:     {db.get_meta('name') or 'tor2-server'}")
+            print(f"address:  {onion}")
+            print(f"channels: {', '.join('#' + c for c in db.channels())}")
+            print(f"members:  {db.member_count()}")
         db.close()
         return 0
 
