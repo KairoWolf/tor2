@@ -1085,6 +1085,12 @@ class Tor2App(ServerModeMixin, App):
 
     # ---------- input ----------
 
+    SERVER_ONLY = {
+        "/ch", "/channel", "/channels", "/members", "/more", "/del", "/delete",
+        "/leave", "/get", "/mkchan", "/rmchan", "/kick", "/ban", "/unban",
+        "/bans", "/promote", "/demote", "/newinvite", "/autoupdate",
+    }
+
     ALL_COMMANDS = [
         "/help", "/nick", "/update", "/disconnect", "/settings", "/quit",
         "/code", "/join", "/connect", "/accept", "/reject", "/add",
@@ -1245,7 +1251,13 @@ class Tor2App(ServerModeMixin, App):
                 ):
                     self.sys_msg(line_)
             case _:
-                self.sys_msg(f"unknown command: {cmd} (try /help)", "red")
+                if cmd in self.SERVER_ONLY:
+                    where = ("a direct chat" if self.conv.kind == "dm"
+                             else "no conversation")
+                    self.sys_msg(f"{cmd} only works on a server — you are in "
+                                 f"{where}", "red")
+                else:
+                    self.sys_msg(f"unknown command: {cmd} (try /help)", "red")
 
     async def handle_server_command(self, cmd: str, arg: str) -> bool:
         """Commands that mean something different (or only exist) on a server.
@@ -1277,7 +1289,8 @@ class Tor2App(ServerModeMixin, App):
                 await self.cmd_play(arg)
             case "/save":
                 self.cmd_save(arg)
-            case "/mkchan" | "/rmchan" | "/newinvite" | "/kick":
+            case ("/mkchan" | "/rmchan" | "/newinvite" | "/kick" | "/ban"
+                  | "/unban" | "/bans" | "/promote" | "/demote" | "/autoupdate"):
                 if not self.srv.get("admin"):
                     self.sys_msg("admin only", "red")
                 else:
