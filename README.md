@@ -169,11 +169,15 @@ admin.
 
 Your membership token is saved, so rejoining is one command. Inside a
 server, a sidebar lists channels and who is online, and the input bar posts
-to the current channel:
+to the current channel.
+
+**Switching channels:** click one in the sidebar, or press **↑/↓** — the
+input bar keeps focus either way, so you can keep typing. `/ch <name>`
+still works if you prefer commands.
 
 | command | effect |
 |---|---|
-| `/ch <name>` | switch channel |
+| `/ch <name>` | switch channel (or just click / press ↑↓) |
 | `/channels` · `/members` | list channels / who's online |
 | `/img <path>` | post an image (shown inline to everyone) |
 | `/vid <path>` | post a video (auto-compressed; others download on demand) |

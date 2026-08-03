@@ -11,11 +11,11 @@ from pathlib import Path
 
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Input, RichLog, Static
 
 from . import proto, store, video
-from .clientserver import SERVER, ServerModeMixin
+from .clientserver import SERVER, ChannelItem, ServerModeMixin
 from .imgview import render_preview, validate_image
 from .tornet import TorNet, code_to_key, normalize_onion, onion_from_pub
 
@@ -50,9 +50,21 @@ class Tor2App(ServerModeMixin, App):
     }
     #sidebar {
         width: 22;
-        padding: 0 1;
         border-right: solid $primary-darken-1;
         display: none;
+    }
+    #srvname { padding: 0 1; text-style: bold; }
+    #chanlist { height: auto; }
+    #onlinelist { padding: 1 1 0 1; }
+    .chan {
+        padding: 0 1;
+        color: $text-muted;
+    }
+    .chan:hover { background: $boost; }
+    .chan.-active {
+        background: $accent;
+        color: $text;
+        text-style: bold;
     }
     #chat {
         border: round $primary-darken-1;
@@ -65,7 +77,11 @@ class Tor2App(ServerModeMixin, App):
     }
     """
 
-    BINDINGS = [("ctrl+q", "quit", "Quit")]
+    BINDINGS = [
+        ("ctrl+q", "quit", "Quit"),
+        ("up", "channel_prev", "Previous channel"),
+        ("down", "channel_next", "Next channel"),
+    ]
 
     def __init__(self):
         super().__init__()
@@ -87,7 +103,10 @@ class Tor2App(ServerModeMixin, App):
     def compose(self) -> ComposeResult:
         yield Static(" tor2 · starting…", id="status")
         with Horizontal():
-            yield Static(id="sidebar")
+            with Vertical(id="sidebar"):
+                yield Static(id="srvname")
+                yield Vertical(id="chanlist")
+                yield Static(id="onlinelist")
             yield RichLog(id="chat", wrap=True, markup=False)
         yield Input(placeholder="message…  (/help for commands)", id="inputbar")
 
@@ -630,7 +649,8 @@ class Tor2App(ServerModeMixin, App):
                 for line_ in (
                     f"— server “{self.srv['name']}” —",
                     "type to chat in the current channel",
-                    "/ch <name>         — switch channel      /channels · /members",
+                    "click a channel or press ↑/↓ to switch  ·  /ch <name> also works",
+                    "/channels · /members",
                     "/img <path>        — post an image (shown inline to everyone)",
                     "/vid <path>        — post a video (others download with /get)",
                     "/get <id>          — download a posted video",
@@ -672,6 +692,12 @@ class Tor2App(ServerModeMixin, App):
             t.append(f"{name:<20}", style="bold cyan")
             t.append(onion, style="bright_black")
             self.chat.write(t)
+
+    def action_channel_prev(self) -> None:
+        self.cycle_channel(-1)
+
+    def action_channel_next(self) -> None:
+        self.cycle_channel(1)
 
     async def action_quit(self) -> None:
         await self.stop_code()

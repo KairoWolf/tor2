@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from rich.text import Text
+from textual.widgets import Static
 
 from . import proto, store, video
 from .imgview import render_preview, validate_image
@@ -19,6 +20,17 @@ from .tornet import normalize_onion
 
 SERVER = "server"
 HANDSHAKE_TIMEOUT = 60
+
+
+class ChannelItem(Static):
+    """One clickable channel row in the sidebar."""
+
+    def __init__(self, channel: str):
+        super().__init__(f"# {channel}", classes="chan")
+        self.channel = channel
+
+    def on_click(self) -> None:
+        self.app.run_worker(self.app.server_switch(self.channel), exclusive=False)
 
 
 class ServerModeMixin:
@@ -299,10 +311,12 @@ class ServerModeMixin:
         if chan not in self.srv["channels"]:
             self.sys_msg(f"no channel #{chan} (see the sidebar)", "red")
             return
+        if chan == self.srv.get("channel"):
+            return
         self.srv["channel"] = chan
         await self.session.send({"t": "switch", "chan": chan})
         self.redraw_channel()
-        self.refresh_sidebar()
+        self.mark_active_channel()
         self.update_server_status()
 
     async def server_send_media(self, path_str: str, kind: str) -> None:
@@ -390,18 +404,41 @@ class ServerModeMixin:
         if self.state != SERVER:
             return
         s = self.srv
-        t = Text()
-        t.append(f"{s['name'][:18]}\n", style="bold")
-        t.append("─" * 18 + "\n", style="bright_black")
-        for ch in s["channels"]:
-            active = ch == s["channel"]
-            t.append(f"{'▸' if active else ' '} #{ch[:15]}\n",
-                     style="bold cyan" if active else "bright_black")
-        t.append("\nonline\n", style="bold")
+        self.query_one("#srvname", Static).update(s["name"][:20])
+
+        listed = [w.channel for w in self.query(ChannelItem)]
+        if listed != s["channels"]:
+            self.run_worker(self.rebuild_channel_items(), exclusive=True)
+        else:
+            self.mark_active_channel()
+
+        online = Text("online\n", style="bold")
         for n in s["online"][:12]:
-            t.append(f"  {n[:16]}\n",
-                     style="green" if n == self.nick else "bright_black")
-        self.query_one("#sidebar").update(t)
+            online.append(f" {n[:18]}\n",
+                          style="green" if n == self.nick else "bright_black")
+        self.query_one("#onlinelist", Static).update(online)
+
+    async def rebuild_channel_items(self) -> None:
+        chanlist = self.query_one("#chanlist")
+        await chanlist.remove_children()
+        await chanlist.mount_all([ChannelItem(c) for c in self.srv["channels"]])
+        self.mark_active_channel()
+
+    def mark_active_channel(self) -> None:
+        for w in self.query(ChannelItem):
+            w.set_class(w.channel == self.srv.get("channel"), "-active")
+
+    def cycle_channel(self, delta: int) -> None:
+        """Arrow-key channel switching, so the input bar keeps focus."""
+        if self.state != SERVER:
+            return
+        chans = self.srv.get("channels") or []
+        if len(chans) < 2:
+            return
+        here = self.srv.get("channel")
+        i = chans.index(here) if here in chans else 0
+        self.run_worker(self.server_switch(chans[(i + delta) % len(chans)]),
+                        exclusive=False)
 
     def redraw_channel(self) -> None:
         self.chat.clear()
