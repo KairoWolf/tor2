@@ -213,7 +213,8 @@ private fun DirectComposer(enabled: Boolean, onSend: (String) -> Unit,
     var text by remember { mutableStateOf("") }
     var showAttach by remember { mutableStateOf(false) }
     Surface(tonalElevation = 3.dp) {
-        Column(Modifier.navigationBarsPadding()) {
+        Column(Modifier.windowInsetsPadding(
+                   WindowInsets.ime.union(WindowInsets.navigationBars))) {
             AnimatedVisibility(showAttach, enter = expandVertically() + fadeIn(),
                                exit = shrinkVertically() + fadeOut()) {
                 Row(Modifier.fillMaxWidth().padding(12.dp),

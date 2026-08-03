@@ -7,6 +7,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -65,6 +67,9 @@ class ServerClient(
         manualClose = false
         refusal = null
         state.value = ConnState.Connecting
+        android.util.Log.i("tor2", "connecting to ${saved.key} at " +
+                "${(permanentAddress ?: saved.onion).take(12)}… " +
+                "token=${saved.token.isNotBlank()} code=${joinCode.isNotBlank()}")
         try {
             val target = permanentAddress ?: saved.onion
             val (socket, input, output) = tor.dial(target)
@@ -89,6 +94,7 @@ class ServerClient(
             loop = scope.launch { receiveLoop(s) }
             scope.launch { keepalive(s) }
         } catch (e: Exception) {
+            android.util.Log.w("tor2", "connect to ${saved.key} failed", e)
             notice.value = e.message ?: "Could not connect"
             state.value = ConnState.Failed
             scheduleReconnect()
@@ -115,6 +121,7 @@ class ServerClient(
                 }
             }
         } catch (e: Exception) {
+            android.util.Log.w("tor2", "session for ${saved.key} ended", e)
             if (session === s && !manualClose) {
                 session = null
                 state.value = ConnState.Failed
@@ -369,6 +376,70 @@ class ServerClient(
         transfer.value = TransferState()
     }
 
+    /**
+     * Pull a file down several Tor circuits at once.
+     *
+     * One circuit is slow and its speed varies wildly, so ranges are taken
+     * from a shared queue: a slow circuit costs one piece rather than a fixed
+     * quarter of the file, and the fast ones keep working to the end.
+     */
+    private fun startParallelDownload(info: MediaInfo, file: File,
+                                      handle: RandomAccessFile) {
+        val token = saved.token.ifBlank { return }
+        val address = permanentAddress ?: saved.onion
+        scope.launch(Dispatchers.IO) {
+            val streams = Parallel.extraCircuits(tor, address, token, nick, 3)
+            if (streams.isEmpty()) return@launch          // single circuit will do
+            notice.value = "Downloading over ${streams.size + 1} circuits…"
+            val plan = ChunkPlan(info.size, Protocol.BIG_CHUNK.toLong().toInt())
+            val started = System.currentTimeMillis()
+            try {
+                streams.map { sess ->
+                    async {
+                        while (true) {
+                            val piece = plan.take() ?: break
+                            var pos = piece.first
+                            runCatching {
+                                sess.send(JSONObject().apply {
+                                    put("t", "fetch"); put("id", info.id)
+                                    put("start", pos); put("end", piece.second)
+                                })
+                                while (pos < piece.second) {
+                                    val f = sess.receive()
+                                    val bin = f.binary ?: continue
+                                    val off = f.json.optLong("off", pos)
+                                    synchronized(handle) {
+                                        handle.seek(off)
+                                        handle.write(bin)
+                                    }
+                                    pos = off + bin.size
+                                    noteProgress(bin.size, info, started)
+                                }
+                            }.onFailure {
+                                plan.giveBack(pos to piece.second)
+                                return@async
+                            }
+                        }
+                    }
+                }.awaitAll()
+            } finally {
+                streams.forEach { it.close() }
+            }
+        }
+    }
+
+    private var received = 0L
+
+    private fun noteProgress(bytes: Int, info: MediaInfo, startedAt: Long) {
+        received += bytes
+        val seconds = (System.currentTimeMillis() - startedAt) / 1000.0
+        val rate = if (seconds > 0.5) (received / seconds).toLong() else 0
+        transfer.value = TransferState(
+            label = "Downloading ${info.display}" +
+                    (if (rate > 0) " · ${fmtSize(rate)}/s" else ""),
+            done = received, total = info.size, active = true)
+    }
+
     private fun startDownload(j: JSONObject) {
         val info = MediaInfo(j.optInt("id"), j.optString("kind"),
                              j.optString("name"), j.optLong("size"),
@@ -380,24 +451,31 @@ class ServerClient(
             val raf = RandomAccessFile(file, "rw")
             raf.setLength(info.size)
             download = Download(info, file, raf)
-            transfer.value = TransferState("downloading ${info.display}", 0,
+            received = 0
+            transfer.value = TransferState("Downloading ${info.display}", 0,
                                            info.size, true)
+            // worth the extra circuits only when there is enough to share out
+            if (info.size >= Parallel.MIN_SIZE) {
+                startParallelDownload(info, file, raf)
+            }
         }
     }
 
     private fun appendDownload(j: JSONObject, data: ByteArray) {
         val d = download ?: return
         runCatching {
-            d.handle.seek(j.optLong("off", d.got))
-            d.handle.write(data)
+            synchronized(d.handle) {
+                d.handle.seek(j.optLong("off", d.got))
+                d.handle.write(data)
+            }
             d.got += data.size
-            transfer.value = transfer.value.copy(done = d.got)
-            if (d.got >= d.info.size) {
-                d.handle.close()
+            noteProgress(data.size, d.info, System.currentTimeMillis() - 1000)
+            if (d.got >= d.info.size || received >= d.info.size) {
+                runCatching { d.handle.close() }
                 download = null
                 transfer.value = TransferState()
                 downloadReady.value = d.file
-                notice.value = "saved ${d.info.display}"
+                notice.value = "Saved ${d.info.display}"
             }
         }
     }

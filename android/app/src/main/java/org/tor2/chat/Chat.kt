@@ -3,6 +3,8 @@ package org.tor2.chat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -16,6 +18,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,6 +29,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -108,14 +112,20 @@ fun ChatPane(
                 item {
                     TextButton(onClick = { vm.loadOlder() },
                                modifier = Modifier.fillMaxWidth()) {
-                        Text("Load earlier messages", style = MaterialTheme.typography.labelSmall)
+                        Text("Load earlier messages",
+                             style = MaterialTheme.typography.labelSmall)
                     }
                 }
-                items(messages, key = { it.id ?: it.hashCode() }) { msg ->
-                    val previous = messages.getOrNull(messages.indexOf(msg) - 1)
+                itemsIndexed(messages, key = { _, m -> m.id ?: m.hashCode() }) { i, msg ->
+                    val previous = messages.getOrNull(i - 1)
+                    if (previous == null || !sameDay(previous.timestamp, msg.timestamp)) {
+                        DaySeparator(msg.timestamp)
+                    }
                     MessageRow(
                         msg = msg,
-                        grouped = previous?.nick == msg.nick &&
+                        grouped = previous != null &&
+                                sameDay(previous.timestamp, msg.timestamp) &&
+                                previous.nick == msg.nick &&
                                 msg.timestamp - previous.timestamp < 5 * 60_000,
                         onPreview = { vm.preview(it) },
                         onDownload = { vm.download(it) },
@@ -123,6 +133,27 @@ fun ChatPane(
                         onOpen = { vm.openMedia(it) },
                     )
                 }
+                item { Spacer(Modifier.height(4.dp)) }
+            }
+
+            // only offered when it would do something: reading history
+            val awayFromBottom by remember {
+                derivedStateOf {
+                    messages.isNotEmpty() &&
+                        listState.firstVisibleItemIndex < messages.size - 3
+                }
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = awayFromBottom,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(14.dp),
+                enter = scaleIn(spring(Spring.DampingRatioMediumBouncy)) + fadeIn(),
+                exit = scaleOut() + fadeOut(),
+            ) {
+                SmallFloatingActionButton(
+                    onClick = {
+                        scope.launch { listState.animateScrollToItem(messages.lastIndex) }
+                    },
+                ) { Icon(Icons.Default.KeyboardArrowDown, "jump to latest") }
             }
 
             androidx.compose.animation.AnimatedVisibility(
@@ -216,18 +247,57 @@ private fun NoticeStrip(text: String, onDismiss: () -> Unit) {
 @Composable
 private fun TransferStrip(t: TransferState) {
     val progress by animateFloatAsState(t.fraction, tween(250), label = "xfer")
-    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)) {
-        Row {
-            Text(t.label, Modifier.weight(1f),
-                 style = MaterialTheme.typography.labelSmall)
-            Text("${(t.fraction * 100).toInt()}%  ${fmtSize(t.done)}/${fmtSize(t.total)}",
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(t.label, Modifier.weight(1f),
+                     style = MaterialTheme.typography.labelSmall,
+                     maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${(t.fraction * 100).toInt()}%",
+                     style = MaterialTheme.typography.labelSmall,
+                     color = MaterialTheme.colorScheme.primary)
+            }
+            Spacer(Modifier.height(5.dp))
+            LinearProgressIndicator(progress = { progress },
+                                    modifier = Modifier.fillMaxWidth().height(5.dp)
+                                        .clip(RoundedCornerShape(3.dp)))
+            Spacer(Modifier.height(4.dp))
+            Text("${fmtSize(t.done)} of ${fmtSize(t.total)}",
                  style = MaterialTheme.typography.labelSmall,
                  color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Spacer(Modifier.height(4.dp))
-        LinearProgressIndicator(progress = { progress },
-                                modifier = Modifier.fillMaxWidth().height(4.dp)
-                                    .clip(RoundedCornerShape(2.dp)))
+    }
+}
+
+/** A quiet marker between days, so a long scroll stays legible. */
+@Composable
+private fun DaySeparator(timestamp: Long) {
+    val label = remember(timestamp / 86_400_000) { dayLabel(timestamp) }
+    Row(Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        HorizontalDivider(Modifier.weight(1f),
+                          color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+        Text(label, Modifier.padding(horizontal = 10.dp),
+             style = MaterialTheme.typography.labelSmall,
+             color = MaterialTheme.colorScheme.onSurfaceVariant)
+        HorizontalDivider(Modifier.weight(1f),
+                          color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+    }
+}
+
+private fun sameDay(a: Long, b: Long): Boolean {
+    val ca = java.util.Calendar.getInstance().apply { timeInMillis = a }
+    val cb = java.util.Calendar.getInstance().apply { timeInMillis = b }
+    return ca.get(java.util.Calendar.YEAR) == cb.get(java.util.Calendar.YEAR) &&
+            ca.get(java.util.Calendar.DAY_OF_YEAR) == cb.get(java.util.Calendar.DAY_OF_YEAR)
+}
+
+private fun dayLabel(timestamp: Long): String {
+    val now = System.currentTimeMillis()
+    return when {
+        sameDay(timestamp, now) -> "Today"
+        sameDay(timestamp, now - 86_400_000) -> "Yesterday"
+        else -> SimpleDateFormat("d MMMM", Locale.getDefault()).format(Date(timestamp))
     }
 }
 
@@ -293,8 +363,11 @@ fun MessageRow(
                 }
             }
             msg.body?.takeIf { it.isNotBlank() }?.let {
-                Text(it, Modifier.padding(start = 40.dp, top = 1.dp),
-                     style = MaterialTheme.typography.bodyLarge)
+                Text(it, Modifier.padding(start = 40.dp, top = 2.dp, end = 4.dp),
+                     style = MaterialTheme.typography.bodyLarge,
+                     color = if (msg.pending)
+                         MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                     else MaterialTheme.colorScheme.onSurface)
             }
             msg.inlineImage?.let { InlineImage(it) }
             // A still travels with every picture and video, so the chat shows
@@ -444,7 +517,9 @@ private fun Composer(enabled: Boolean, onSend: (String) -> Unit,
     val canSend = text.isNotBlank() && enabled
     Surface(tonalElevation = 3.dp) {
         Row(
-            Modifier.fillMaxWidth().padding(8.dp).navigationBarsPadding(),
+            Modifier.fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
+                .padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onAttach, enabled = enabled) {

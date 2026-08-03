@@ -7,6 +7,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -73,7 +75,12 @@ fun MainScreen(vm: AppViewModel) {
                         vm.banner.value = null
                     }
                 }
-                Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
+                Scaffold(
+                    snackbarHost = { SnackbarHost(snackbar) },
+                    // the composer handles the keyboard inset itself, so the
+                    // scaffold must not consume it first
+                    contentWindowInsets = WindowInsets.statusBars,
+                ) { padding ->
                     Box(Modifier.padding(padding)) {
                         val c = client
                         val dm = openChat
