@@ -14,13 +14,14 @@ import base64
 import binascii
 import logging
 import re
+import os
 import shutil
 import signal
 import sqlite3
 import sys
 from pathlib import Path
 
-from . import media, proto, updater, video
+from . import atrest, media, proto, updater, video
 from .serverdb import ServerDB
 from .tornet import TorNet
 
@@ -31,6 +32,8 @@ HISTORY_ON_JOIN = 50
 UPDATE_CHECK_INTERVAL = 24 * 60 * 60
 RATE_WINDOW = 10.0        # seconds
 RATE_MAX = 15             # messages per window per member
+AUTH_FAIL_WINDOW = 300.0  # seconds
+AUTH_FAIL_MAX = 10        # bad invites/tokens before new attempts are refused
 
 
 def clean_nick(raw: str) -> str:
@@ -83,12 +86,16 @@ class Client:
 
 
 class Tor2Server:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, passphrase: str | None = None):
         self.data_dir = data_dir
-        self.db = ServerDB(data_dir)
+        key = atrest.load_key(data_dir, passphrase)
+        self.vault = atrest.Vault(key)
+        self.key_fp = atrest.key_fingerprint(key)
+        self.db = ServerDB(data_dir, vault=self.vault)
         self.tor = TorNet(data_dir / "tordata")
         self.clients: set[Client] = set()
         self.uploads: dict[int, dict] = {}   # member id -> in-flight upload
+        self.auth_failures: list[float] = []  # timestamps, for brute-force defence
         self.name = self.db.get_meta("name") or "tor2-server"
         self.closing = False
         self.restart_requested = False
@@ -121,6 +128,7 @@ class Tor2Server:
             print("  join with:  /joinserver "
                   f"{onion} {admin_invite}", flush=True)
         print(f"  channels: {', '.join('#' + c for c in self.db.channels())}", flush=True)
+        print(f"  storage:  encrypted at rest (key {self.key_fp})", flush=True)
         print("  for lawful use only — see README", flush=True)
         print("=" * 68 + "\n", flush=True)
 
@@ -205,7 +213,21 @@ class Tor2Server:
 
     # ---------- auth ----------
 
+    def auth_locked(self) -> bool:
+        """Refuse guessing sprees at invite codes and tokens."""
+        now = asyncio.get_event_loop().time()
+        self.auth_failures = [t for t in self.auth_failures
+                              if now - t < AUTH_FAIL_WINDOW]
+        return len(self.auth_failures) >= AUTH_FAIL_MAX
+
+    def note_auth_failure(self) -> None:
+        self.auth_failures.append(asyncio.get_event_loop().time())
+
     async def do_auth(self, c: Client, msg: dict) -> None:
+        if self.auth_locked():
+            c.enqueue({"t": "srverr", "msg":
+                       "too many failed join attempts recently — try again later"})
+            raise proto.ProtocolError("auth locked")
         nick = clean_nick(msg.get("nick", ""))
         token = str(msg.get("token", ""))[:200]
         invite = str(msg.get("invite", ""))[:64]
@@ -213,6 +235,7 @@ class Tor2Server:
         if token:
             row = self.db.member_by_token(token)
             if row is None:
+                self.note_auth_failure()
                 c.enqueue({"t": "srverr", "msg":
                            "your membership is no longer valid — ask for a new invite"})
                 raise proto.ProtocolError("bad token")
@@ -228,6 +251,7 @@ class Tor2Server:
                 raise proto.ProtocolError("banned")
             is_admin = self.db.redeem_invite(invite)
             if is_admin is None:
+                self.note_auth_failure()
                 c.enqueue({"t": "srverr", "msg": "invalid or used-up invite code"})
                 raise proto.ProtocolError("bad invite")
             c.member_id, new_token = self.db.create_member(nick, is_admin)
@@ -424,19 +448,21 @@ class Tor2Server:
         and Session.send already serializes frames, so chat still interleaves.
         """
         try:
-            stop = end if end is not None else path.stat().st_size
-            with path.open("rb") as f:
-                f.seek(start)
-                pos = start
-                while pos < stop:
-                    chunk = f.read(min(chunk_size, stop - pos))
-                    if not chunk:
-                        break
+            pos = start
+            buf = bytearray()
+            for plain in self.db.vault.open_file_iter(path, start, end):
+                buf += plain
+                while len(buf) >= chunk_size:
                     if c not in self.clients:
                         return
+                    piece = bytes(buf[:chunk_size])
+                    del buf[:chunk_size]
                     await c.session.send_binary(
-                        {"t": "mgchunk", "id": mid, "off": pos}, chunk)
-                    pos += len(chunk)
+                        {"t": "mgchunk", "id": mid, "off": pos}, piece)
+                    pos += len(piece)
+            if buf and c in self.clients:
+                await c.session.send_binary(
+                    {"t": "mgchunk", "id": mid, "off": pos}, bytes(buf))
         except (OSError, ConnectionError, asyncio.CancelledError) as e:
             log.info("media #%s stream to %s ended: %s", mid, c.nick, e)
 
@@ -759,20 +785,33 @@ def main(argv: list[str] | None = None) -> int:
                     help="print address, name, channels and member count, then exit")
     ap.add_argument("--backup", metavar="DEST",
                     help="write a restorable backup archive and exit")
+    ap.add_argument("--passphrase", action="store_true",
+                    help="derive the at-rest key from a passphrase (prompted) "
+                         "instead of a key file — stronger, but the server "
+                         "cannot restart unattended")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    passphrase = os.environ.get("TOR2_PASSPHRASE") or None
     logging.getLogger("stem").setLevel(logging.WARNING)
     data_dir = Path(args.data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     data_dir.chmod(0o700)
 
     if args.invite or args.admin_invite:
-        db = ServerDB(data_dir)
+        db = ServerDB(data_dir, vault=atrest.Vault(
+            atrest.load_key(data_dir, passphrase)))
         print(db.create_invite(uses=1, is_admin=args.admin_invite))
         db.close()
         return 0
+
+    if getattr(args, "passphrase", False) and not passphrase:
+        import getpass as _gp
+        passphrase = _gp.getpass("at-rest passphrase: ")
+        if not passphrase:
+            print("no passphrase given", file=sys.stderr)
+            return 1
 
     if args.backup:
         try:
@@ -786,7 +825,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.address or args.info:
-        db = ServerDB(data_dir)
+        db = ServerDB(data_dir, vault=atrest.Vault(
+            atrest.load_key(data_dir, passphrase)))
         onion = db.get_meta("onion")
         if not onion:
             print("no address yet — start the server once so tor can publish it",
@@ -803,7 +843,7 @@ def main(argv: list[str] | None = None) -> int:
         db.close()
         return 0
 
-    server = Tor2Server(data_dir)
+    server = Tor2Server(data_dir, passphrase=passphrase)
     if args.name:
         server.db.set_meta("name", args.name)
         server.name = args.name

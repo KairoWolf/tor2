@@ -13,12 +13,44 @@ import sqlite3
 import time
 from pathlib import Path
 
+MEDIA_MAGIC = b"T2R1"
 HISTORY_PER_CHANNEL = 500
 # Blobs kept on disk. Big videos are allowed up to 3 GB each, so this has to
 # be roomy; the real backstop is the 80%-disk check in the daemon.
 MEDIA_TOTAL_CAP = int(os.environ.get("TOR2_MEDIA_CAP_BYTES",
                                      20 * 1024 * 1024 * 1024))
 CHANNEL_RE = re.compile(r"^[a-z0-9][a-z0-9\-_]{0,23}$")
+
+class _NullVault:
+    """Used when encryption at rest is off, so callers need no special case."""
+    enabled = False
+
+    def seal(self, value):
+        return value
+
+    def open(self, value):
+        if value is None or isinstance(value, str):
+            return value
+        return bytes(value).decode()
+
+    def seal_file(self, src, dest):
+        os.replace(src, dest)
+
+    def open_file_iter(self, path, start=0, end=None):
+        with path.open("rb") as f:
+            f.seek(start)
+            left = None if end is None else max(0, end - start)
+            while True:
+                want = 1024 * 1024 if left is None else min(1024 * 1024, left)
+                if want <= 0:
+                    return
+                data = f.read(want)
+                if not data:
+                    return
+                if left is not None:
+                    left -= len(data)
+                yield data
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -75,8 +107,9 @@ def new_code() -> str:
 
 
 class ServerDB:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, vault=None):
         self.data_dir = data_dir
+        self.vault = vault or _NullVault()
         self.media_dir = data_dir / "media"
         self.media_dir.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(data_dir / "server.db")
@@ -239,7 +272,9 @@ class ServerDB:
         ts = time.time()
         cur = self.db.execute(
             "INSERT INTO messages(channel_id,member_id,nick,ts,body,media_id) "
-            "VALUES(?,?,?,?,?,?)", (cid, member_id, nick, ts, body, media_id))
+            "VALUES(?,?,?,?,?,?)",
+            (cid, member_id, self.vault.seal(nick), ts,
+             self.vault.seal(body), media_id))
         self.db.commit()
         self._prune(cid)
         return {"id": cur.lastrowid, "chan": channel, "nick": nick,
@@ -267,8 +302,10 @@ class ServerDB:
             rows = self.db.execute(
                 "SELECT * FROM messages WHERE channel_id=? ORDER BY id DESC LIMIT ?",
                 (cid, min(limit, HISTORY_PER_CHANNEL))).fetchall()
-        return [{"id": r["id"], "chan": channel, "nick": r["nick"], "ts": r["ts"],
-                 "body": r["body"], "media": self.media_info(r["media_id"])}
+        return [{"id": r["id"], "chan": channel,
+                 "nick": self.vault.open(r["nick"]), "ts": r["ts"],
+                 "body": self.vault.open(r["body"]),
+                 "media": self.media_info(r["media_id"])}
                 for r in reversed(rows)]
 
     def message(self, msg_id: int) -> dict | None:
@@ -277,7 +314,8 @@ class ServerDB:
             return None
         chan = self.db.execute("SELECT name FROM channels WHERE id=?",
                                (r["channel_id"],)).fetchone()
-        return {"id": r["id"], "member_id": r["member_id"], "nick": r["nick"],
+        return {"id": r["id"], "member_id": r["member_id"],
+                "nick": self.vault.open(r["nick"]),
                 "chan": chan["name"] if chan else "", "media_id": r["media_id"]}
 
     def delete_message(self, msg_id: int) -> bool:
@@ -301,6 +339,8 @@ class ServerDB:
 
     def set_thumb(self, media_id: int, thumb: bytes | None) -> None:
         if thumb:
+            if self.vault.enabled:
+                thumb = MEDIA_MAGIC + self.vault.box.encrypt(thumb)
             self.db.execute("UPDATE media SET thumb=? WHERE id=?",
                             (thumb, media_id))
             self.db.commit()
@@ -316,7 +356,12 @@ class ServerDB:
         mid = cur.lastrowid
         path = self.media_dir / f"{mid:06d}.{ext}"
         try:
-            sink.finish(path)
+            if self.vault.enabled:
+                staged = path.with_suffix(path.suffix + ".plain")
+                sink.finish(staged)
+                self.vault.seal_file(staged, path)
+            else:
+                sink.finish(path)
         except (ValueError, OSError):
             self.db.execute("DELETE FROM media WHERE id=?", (mid,))
             self.db.commit()
@@ -339,15 +384,21 @@ class ServerDB:
         info = {"id": r["id"], "kind": r["kind"], "ext": r["ext"],
                 "size": r["size"], "sha256": r["sha256"]}
         if r["thumb"]:
-            info["thumb"] = base64.b64encode(r["thumb"]).decode()
+            raw = bytes(r["thumb"])
+            if raw[:4] == MEDIA_MAGIC and getattr(self.vault, "box", None):
+                raw = self.vault.box.decrypt(raw[4:])
+            info["thumb"] = base64.b64encode(raw).decode()
         return info
 
     def media_bytes(self, media_id: int) -> bytes | None:
+        """Whole-file plaintext. Only for images, which are small."""
         r = self.db.execute("SELECT path FROM media WHERE id=?", (media_id,)).fetchone()
         if r is None:
             return None
         p = Path(r["path"])
-        return p.read_bytes() if p.is_file() else None
+        if not p.is_file():
+            return None
+        return b"".join(self.vault.open_file_iter(p))
 
     def _evict_media(self) -> None:
         """Drop oldest blobs until the store is under the disk cap."""

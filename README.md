@@ -43,6 +43,7 @@ images and videos.
 4. [Command reference](#4-command-reference)
 5. [How it keeps things private](#5-how-it-keeps-things-private)
 6. [Troubleshooting](#6-troubleshooting)
+7. [Development](#7-development)
 
 ---
 
@@ -217,6 +218,8 @@ repository completely.
 | `/help` | list commands for where you are |
 | **ctrl+n** / **ctrl+p** | switch between open conversations (or click one) |
 | `/nick <name>` | set your display name (remembered) |
+| `/settings` | notifications, theme, previews, quality, transfer streams |
+| **tab** | complete a command, channel or nickname |
 | `/update` | get the latest version from GitHub |
 | `/disconnect` | leave the current chat or server |
 | `ctrl+q` | quit |
@@ -252,6 +255,7 @@ repository completely.
 | `/big-vid <path>` | send a long video — any length, up to 3 GB |
 | `/get <id>` | download something posted in a channel |
 | `/save [id]` | keep a previewed image (they aren't saved unless you ask) |
+| `/audio <path>` | send music or a voice recording (converted to mp3) |
 | `/play [id]` | replay an animated GIF |
 
 Videos are previewed from a still image the sender attaches, so you can see
@@ -304,8 +308,29 @@ Other protections:
 - **Media is verified** before it's kept: images must fully decode, videos
   must probe as real video, and everything must match its SHA-256.
 - **Servers won't fill their own disk** — uploads are refused at 80% usage.
+- **Encrypted at rest**: a server encrypts message bodies and media on disk
+  with XSalsa20-Poly1305, so a stolen disk image or backup yields ciphertext.
+  By default the key is a `0600` file in the data directory, which protects a
+  stolen *database* or *backup* but not a copy of the whole directory. For
+  stronger protection, run with `--passphrase` (or `TOR2_PASSPHRASE`) and the
+  key is derived with Argon2id and never written down — at the cost of the
+  server not being able to restart unattended.
+- **Guessing is throttled**: ten failed invites or tokens within five minutes
+  and the server stops accepting new attempts for a while.
 - **Flood protection**: 15 messages per 10 seconds per member, so nobody can
   push a channel's history out through the retention limit.
+
+### Speed
+
+Transfers use two tricks to make Tor bearable, without weakening anything:
+
+- media travels as **raw binary frames** rather than base64 inside JSON,
+  which is 25% fewer bytes and far less CPU per chunk;
+- large files are **split across several Tor circuits at once** (Tor gives a
+  connection its own circuit when its SOCKS credentials differ), so a
+  transfer is not capped by one circuit's bandwidth. Set the number of
+  streams in `/settings`; it falls back to a single circuit automatically if
+  anything goes wrong.
 
 **Limitations, honestly:** a live 5-digit code is guessable in principle
 (100,000 options), though a guesser still only reaches your accept prompt.
@@ -343,3 +368,16 @@ It reconnects by itself with backoff, using your saved membership. `/server
 **A server command says "admin only"**
 Only admins can manage channels and members. An existing admin can promote
 you with `/promote <your-nick>`.
+
+---
+
+## 7. Development
+
+```sh
+.venv/bin/pip install -e . pytest pytest-timeout
+.venv/bin/pytest tests -q
+```
+
+The suite covers the protocol, server flows, admin controls, multi-session
+routing, encryption at rest, parallel transfers and the UI. It never touches
+the network or your real config. See [CONTRIBUTING.md](CONTRIBUTING.md).
