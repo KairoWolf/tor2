@@ -94,3 +94,24 @@ def test_admin_join_code_grants_admin():
             aio.close()
             srv.db.close()
     asyncio.run(go())
+
+
+def test_authok_reports_the_permanent_address():
+    """A code's address is temporary; clients must be told the real one."""
+    async def go():
+        with tempfile.TemporaryDirectory() as tmp:
+            srv = Tor2Server(Path(tmp))
+            srv.db.set_meta("onion", "realaddress1234567890.onion")
+            code = srv.db.create_join_code(uses=1)
+            aio = await asyncio.start_server(srv.handle_conn, "127.0.0.1", 0)
+            port = aio.sockets[0].getsockname()[1]
+            r, w = await asyncio.open_connection("127.0.0.1", port)
+            s = await proto.handshake(r, w)
+            await s.recv()
+            await s.send({"t": "auth", "nick": "mia", "code": code})
+            ok = await asyncio.wait_for(s.recv(), timeout=10)
+            assert ok["t"] == "authok", ok
+            assert ok["address"] == "realaddress1234567890.onion", ok
+            aio.close()
+            srv.db.close()
+    asyncio.run(go())

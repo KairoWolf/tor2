@@ -44,6 +44,7 @@ class ServerClient(
     private var manualClose = false
     private val pending = mutableListOf<Pair<String, String>>()
     private var download: Download? = null
+    private var permanentAddress: String? = null
 
     private class Download(
         val info: MediaInfo,
@@ -56,7 +57,8 @@ class ServerClient(
         manualClose = false
         state.value = ConnState.Connecting
         try {
-            val (socket, input, output) = tor.dial(saved.onion)
+            val target = permanentAddress ?: saved.onion
+            val (socket, input, output) = tor.dial(target)
             val s = handshake(input, output) { runCatching { socket.close() } }
             val hello = s.receive()
             if (hello.type != "srvhello") {
@@ -115,18 +117,29 @@ class ServerClient(
 
     /** Tor circuits die routinely; come back by ourselves rather than nagging. */
     private fun scheduleReconnect() {
-        if (reconnecting || manualClose || saved.token.isBlank()) return
+        if (reconnecting || manualClose) return
+        if (saved.token.isBlank() && permanentAddress == null) {
+            notice.value = "This server was joined with a code that has since " +
+                    "been used up. Ask for a new code."
+            state.value = ConnState.Failed
+            return
+        }
         reconnecting = true
         scope.launch {
             val delays = listOf(5L, 10L, 20L, 40L, 60L, 120L)
             for ((i, wait) in delays.withIndex()) {
                 delay(wait * 1000)
                 if (manualClose || session != null) break
-                notice.value = "reconnecting (attempt ${i + 1})"
+                notice.value = "Reconnecting… (${i + 1} of ${delays.size})"
                 connect()
                 if (session != null) break
             }
             reconnecting = false
+            if (session == null && !manualClose) {
+                notice.value = "Could not reconnect. Tap the server in the menu " +
+                        "to try again."
+                state.value = ConnState.Failed
+            }
         }
     }
 
@@ -136,8 +149,15 @@ class ServerClient(
             "authok" -> {
                 isAdmin.value = j.optBoolean("admin")
                 val token = j.optString("token", "")
-                if (token.isNotEmpty()) {
-                    store.saveServer(saved.copy(token = token,
+                // A join code's address is temporary — it stops working once
+                // the code is spent — so save the permanent one the server
+                // reports, or reconnecting later would reach nothing.
+                val real = j.optString("address", "").ifBlank { saved.onion }
+                permanentAddress = real
+                if (token.isNotEmpty() || real != saved.onion) {
+                    store.saveServer(saved.copy(
+                        onion = real,
+                        token = token.ifBlank { saved.token },
                         displayName = serverName.value))
                 }
                 val list = j.optJSONArray("channels")

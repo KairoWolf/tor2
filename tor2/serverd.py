@@ -307,7 +307,11 @@ class Tor2Server:
         self.clients.add(c)
         c.enqueue({"t": "authok", "nick": c.nick, "admin": c.is_admin,
                    "token": new_token, "channels": self.db.channels(),
-                   "channel": c.channel, "server": self.name})
+                   "channel": c.channel, "server": self.name,
+                   # A join code's address is temporary and disappears once the
+                   # code is spent, so tell the client the permanent one to
+                   # remember instead.
+                   "address": self.db.get_meta("onion") or ""})
         c.enqueue({"t": "histbatch", "chan": c.channel,
                    "msgs": self.db.history(c.channel, HISTORY_ON_JOIN)})
         log.info("%s authenticated%s", c.nick, " (admin)" if c.is_admin else "")

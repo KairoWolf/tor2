@@ -240,6 +240,10 @@ class ServerModeMixin:
 
     def srv_authok(self, msg: dict) -> None:
         s = self.srv
+        real = str(msg.get("address", "")).strip()
+        if real and real != s.get("onion"):
+            # we arrived on a join code's temporary address; keep the real one
+            s["onion"] = real
         s["name"] = str(msg.get("server", s["name"]))[:40]
         s["admin"] = bool(msg.get("admin"))
         s["channels"] = [str(c) for c in msg.get("channels", [])]
