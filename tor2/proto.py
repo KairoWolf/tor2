@@ -20,8 +20,10 @@ import json
 from nacl.public import Box, PrivateKey, PublicKey
 from nacl.secret import SecretBox
 
-MAGIC = b"TOR2\x03"          # handshake magic, protocol v3
+MAGIC = b"TOR2\x04"          # handshake magic, protocol v4
 INNER_MAGIC = b"T2I1"        # tag inside the inner cipher layer
+KIND_JSON = b"J"             # payload is a JSON object
+KIND_BINARY = b"B"           # JSON header + raw bytes, no base64
 INNER_PERSON = b"tor2-inner-v1"
 
 MAX_FRAME = 16 * 1024 * 1024
@@ -97,8 +99,21 @@ class Session:
         self._send_lock = asyncio.Lock()
 
     async def send(self, obj: dict) -> None:
-        plaintext = json.dumps(obj, separators=(",", ":")).encode()
-        inner_ct = self.inner.encrypt(INNER_MAGIC + plaintext)
+        await self._send_payload(KIND_JSON,
+                                 json.dumps(obj, separators=(",", ":")).encode())
+
+    async def send_binary(self, header: dict, blob: bytes) -> None:
+        """Send raw bytes with a small JSON header.
+
+        Media used to be base64 inside JSON, which inflated every transfer by
+        a third. This carries the bytes as they are.
+        """
+        head = json.dumps(header, separators=(",", ":")).encode()
+        await self._send_payload(
+            KIND_BINARY, len(head).to_bytes(4, "big") + head + blob)
+
+    async def _send_payload(self, kind: bytes, payload: bytes) -> None:
+        inner_ct = self.inner.encrypt(INNER_MAGIC + kind + payload)
         outer_ct = self.box.encrypt(inner_ct)  # each layer: random nonce prepended
         frame = len(outer_ct).to_bytes(4, "big") + outer_ct
         async with self._send_lock:
@@ -115,9 +130,23 @@ class Session:
         tagged = self.inner.decrypt(inner_ct)
         if tagged[: len(INNER_MAGIC)] != INNER_MAGIC:
             raise ProtocolError("inner layer tag mismatch — not a tor2 peer")
-        obj = json.loads(tagged[len(INNER_MAGIC):].decode())
+        kind = tagged[len(INNER_MAGIC):len(INNER_MAGIC) + 1]
+        body = tagged[len(INNER_MAGIC) + 1:]
+        if kind == KIND_JSON:
+            obj = json.loads(body.decode())
+            blob = None
+        elif kind == KIND_BINARY:
+            head_len = int.from_bytes(body[:4], "big")
+            if head_len > 65536 or head_len + 4 > len(body):
+                raise ProtocolError("bad binary header")
+            obj = json.loads(body[4:4 + head_len].decode())
+            blob = body[4 + head_len:]
+        else:
+            raise ProtocolError("unknown payload kind")
         if not isinstance(obj, dict) or obj.get("t") not in ALLOWED_TYPES:
             raise ProtocolError("unknown message type")
+        if blob is not None:
+            obj["bin"] = blob
         return obj
 
     async def close(self) -> None:

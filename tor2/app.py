@@ -839,7 +839,11 @@ class Tor2App(ServerModeMixin, App):
         if sink is None:
             return
         try:
-            sink.write(base64.b64decode(msg.get("data", ""), validate=True))
+            data = msg.get("bin")
+            if data is None:
+                data = base64.b64decode(msg.get("data", ""), validate=True)
+            off = msg.get("off")
+            sink.write(data, offset=int(off) if off is not None else None)
         except Exception as e:
             sink.abort()
             self._incoming_video = None

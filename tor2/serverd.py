@@ -88,6 +88,7 @@ class Tor2Server:
         self.db = ServerDB(data_dir)
         self.tor = TorNet(data_dir / "tordata")
         self.clients: set[Client] = set()
+        self.uploads: dict[int, dict] = {}   # member id -> in-flight upload
         self.name = self.db.get_meta("name") or "tor2-server"
         self.closing = False
         self.restart_requested = False
@@ -327,6 +328,8 @@ class Tor2Server:
                 thumb = None
         c.upload = {"kind": kind, "ext": ext, "chan": chan, "sink": sink,
                     "thumb": thumb}
+        # shared by member id so extra circuits can feed the same upload
+        self.uploads[c.member_id] = c.upload
         if size > proto.MAX_VIDEO_BYTES:
             log.info("%s uploading %s (%.1f MB)", c.nick, ext, size / 1024 / 1024)
 
@@ -347,22 +350,27 @@ class Tor2Server:
                 f"{proto.SERVER_DISK_LIMIT * 100:.0f}% disk usage")
 
     async def do_mchunk(self, c: Client, msg: dict) -> None:
-        up = c.upload
+        up = c.upload or self.uploads.get(c.member_id)
         if up is None:
             return
         sink = up["sink"]
         try:
-            data = base64.b64decode(msg.get("data", ""), validate=True)
-            sink.write(data)
-        except (binascii.Error, ValueError, OSError) as e:
+            data = msg.get("bin")
+            if data is None:                 # older peers sent base64
+                data = base64.b64decode(msg.get("data", ""), validate=True)
+            off = msg.get("off")
+            sink.write(data, offset=int(off) if off is not None else None)
+        except (binascii.Error, ValueError, OSError, TypeError) as e:
             sink.abort()
             c.upload = None
+            self.uploads.pop(c.member_id, None)
             c.enqueue({"t": "srverr", "msg": f"upload rejected: {e}"})
             return
         if not sink.complete:
             return
 
         c.upload = None
+        self.uploads.pop(c.member_id, None)
         try:
             mid = self.db.add_media_file(up["kind"], up["ext"], sink)
         except ValueError as e:
@@ -392,25 +400,43 @@ class Tor2Server:
             return
         # Read from disk as we go: a 3 GB download must not be materialized.
         chunk_size = proto.chunk_size_for(info["size"])
+        try:
+            start = max(0, int(msg.get("start") or 0))
+            end = int(msg.get("end") or info["size"])
+        except (TypeError, ValueError):
+            start, end = 0, info["size"]
+        end = min(end, info["size"])
+        if start >= end:
+            return
+        ranged = (start, end) != (0, info["size"])
         n_chunks = max(1, (info["size"] + chunk_size - 1) // chunk_size)
-        c.enqueue({"t": "mget", "id": mid, "kind": info["kind"], "ext": info["ext"],
-                   "size": info["size"], "sha256": info["sha256"],
-                   "chunks": n_chunks})
-        asyncio.create_task(self.stream_media(c, path, chunk_size, mid))
+        if not ranged:       # only the first request describes the whole file
+            c.enqueue({"t": "mget", "id": mid, "kind": info["kind"],
+                       "ext": info["ext"], "size": info["size"],
+                       "sha256": info["sha256"], "chunks": n_chunks})
+        asyncio.create_task(
+            self.stream_media(c, path, chunk_size, mid, start, end))
 
     async def stream_media(self, c: Client, path: Path, chunk_size: int,
-                           mid: int) -> None:
+                           mid: int, start: int = 0, end: int | None = None) -> None:
         """Write chunks straight to the socket rather than through the outbound
         queue: queueing a multi-gigabyte download would buffer it in memory,
         and Session.send already serializes frames, so chat still interleaves.
         """
         try:
+            stop = end if end is not None else path.stat().st_size
             with path.open("rb") as f:
-                while chunk := f.read(chunk_size):
+                f.seek(start)
+                pos = start
+                while pos < stop:
+                    chunk = f.read(min(chunk_size, stop - pos))
+                    if not chunk:
+                        break
                     if c not in self.clients:
                         return
-                    await c.session.send({"t": "mgchunk", "id": mid,
-                                          "data": base64.b64encode(chunk).decode()})
+                    await c.session.send_binary(
+                        {"t": "mgchunk", "id": mid, "off": pos}, chunk)
+                    pos += len(chunk)
         except (OSError, ConnectionError, asyncio.CancelledError) as e:
             log.info("media #%s stream to %s ended: %s", mid, c.nick, e)
 

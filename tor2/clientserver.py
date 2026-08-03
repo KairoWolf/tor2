@@ -15,7 +15,7 @@ from pathlib import Path
 from rich.text import Text
 from textual.widgets import Static
 
-from . import media, proto, store, video
+from . import media, proto, settings, store, video
 from .imgview import render_preview, validate_image
 from .tornet import normalize_onion
 
@@ -425,6 +425,10 @@ class ServerModeMixin:
                                 "ext": ext, "id": msg.get("id")}
         self.sys_msg(f"downloading {fmt_size(size)}…", "magenta")
         self.start_transfer("downloading", size)
+        mid = msg.get("id")
+        if mid is not None:
+            self.run_worker(self.try_parallel(int(mid), dict(msg)),
+                            group="net", exclusive=False)
 
     async def srv_mgchunk(self, msg: dict) -> None:
         dl = self.srv.get("download")
@@ -432,7 +436,11 @@ class ServerModeMixin:
             return
         sink = dl["sink"]
         try:
-            sink.write(base64.b64decode(msg.get("data", ""), validate=True))
+            data = msg.get("bin")
+            if data is None:
+                data = base64.b64decode(msg.get("data", ""), validate=True)
+            off = msg.get("off")
+            sink.write(data, offset=int(off) if off is not None else None)
         except Exception as e:
             sink.abort()
             self.srv["download"] = None
@@ -442,7 +450,15 @@ class ServerModeMixin:
         self.transfer_progress(sink.got)
         if not sink.complete:
             return
+        await self.finish_download()
 
+    async def finish_download(self) -> None:
+        dl = self.srv.get("download")
+        if dl is None:
+            return
+        sink = dl["sink"]
+        if not sink.complete:
+            return
         self.srv["download"] = None
         self.progress_done()
         prefix = {"img": "img", "aud": "aud"}.get(dl["kind"], "vid")
@@ -565,13 +581,15 @@ class ServerModeMixin:
             self.start_transfer("uploading", size)
             self.progress("uploading", 0.0, "checksumming…")
             sha = await asyncio.to_thread(media.sha256_file, payload)
-            await media.send_file(
-                self.session, payload,
-                {"t": "mput", "kind": kind, "ext": ext, "chan": self.srv["channel"],
-                 "thumb": base64.b64encode(thumb).decode() if thumb else None},
-                "mchunk", proto.chunk_size_for(size), sha,
-                on_progress=lambda sent, total: self.transfer_progress(sent),
-                keep_going=lambda: self.state == SERVER)
+            meta = {"t": "mput", "kind": kind, "ext": ext,
+                    "chan": self.srv["channel"],
+                    "thumb": base64.b64encode(thumb).decode() if thumb else None}
+            if not await self.parallel_upload(payload, meta, sha, size):
+                await media.send_file(
+                    self.session, payload, meta, "mchunk",
+                    proto.chunk_size_for(size), sha,
+                    on_progress=lambda sent, total: self.transfer_progress(sent),
+                    keep_going=lambda: self.state == SERVER)
         except ConnectionError:
             self.sys_msg("upload aborted: session ended", "red")
             return
@@ -603,6 +621,160 @@ class ServerModeMixin:
             self.sys_msg("usage: /del <message id>", "red")
             return
         await self.session.send({"t": "del", "id": mid})
+
+    def stream_count(self) -> int:
+        try:
+            n = int(settings.get("parallel_streams"))
+        except (TypeError, ValueError):
+            n = 4
+        return max(1, min(8, n))
+
+    async def extra_circuits(self, n: int) -> list:
+        """Open n more sessions to this server, each on its own Tor circuit.
+
+        Tor isolates circuits by SOCKS credentials, so these genuinely run in
+        parallel rather than sharing one circuit's bandwidth.
+        """
+        onion = self.srv.get("onion")
+        token = store.load_servers().get(self.srv.get("local") or "", {}).get("token")
+        if not onion or not token:
+            return []
+
+        async def one(i: int):
+            try:
+                reader, writer = await self.tor.dial(onion, stream=f"tor2-x{i}")
+                sess = await proto.handshake(reader, writer)
+                hello = await asyncio.wait_for(sess.recv(), timeout=HANDSHAKE_TIMEOUT)
+                if hello.get("t") != "srvhello":
+                    raise ConnectionError("not a server")
+                await sess.send({"t": "auth", "nick": self.nick, "token": token})
+                ok = await asyncio.wait_for(sess.recv(), timeout=HANDSHAKE_TIMEOUT)
+                if ok.get("t") != "authok":
+                    raise ConnectionError("auth refused on extra circuit")
+                return sess
+            except Exception:
+                return None
+
+        got = await asyncio.gather(*(one(i) for i in range(n)))
+        return [g for g in got if g is not None]
+
+    async def parallel_upload(self, payload, meta: dict, sha: str,
+                              size: int) -> bool:
+        """Push one file up several circuits at once. True if it was sent."""
+        streams = self.stream_count()
+        if streams < 2 or size < 4 * 1024 * 1024:
+            return False
+        sessions = await self.extra_circuits(streams - 1)
+        if not sessions:
+            return False
+        self.sys_msg(f"uploading over {len(sessions) + 1} circuits…",
+                     "bright_black")
+
+        chunk = proto.chunk_size_for(size)
+        n_chunks = max(1, (size + chunk - 1) // chunk)
+        # the announcement must arrive first; extra circuits then feed the
+        # same upload, which the server tracks per member rather than per
+        # connection
+        await self.session.send({**meta, "size": size, "chunks": n_chunks,
+                                 "sha256": sha})
+        n = len(sessions) + 1
+        span = size // n
+        bounds = [(i * span, size if i == n - 1 else (i + 1) * span)
+                  for i in range(n)]
+        done = 0
+        lock = asyncio.Lock()
+
+        async def push(sess, start, end):
+            nonlocal done
+            async def note(k: int) -> None:
+                nonlocal done
+                async with lock:
+                    done += k
+                    self.transfer_progress(done)
+            await media.send_file(
+                sess, payload, meta, "mchunk", chunk, sha,
+                announce=False, start=start, end=end,
+                sent_cb=lambda k: self.transfer_progress(min(size, done + k)),
+                keep_going=lambda: self.state == SERVER)
+            async with lock:
+                done += end - start
+                self.transfer_progress(done)
+
+        try:
+            await asyncio.gather(
+                push(self.session, *bounds[0]),
+                *(push(sess, a, b) for sess, (a, b) in zip(sessions, bounds[1:])))
+        except Exception as e:
+            self.sys_msg(f"parallel upload failed ({e}) — retrying on one circuit",
+                         "yellow")
+            return False
+        finally:
+            for sess in sessions:
+                await sess.close()
+        return True
+
+    async def try_parallel(self, mid: int, hdr: dict) -> None:
+        """Attempt a multi-circuit download; the normal single-circuit stream
+        continues underneath if it does not work out."""
+        try:
+            if await self.parallel_download(mid, hdr):
+                await self.finish_download()
+        except Exception as e:
+            self.sys_msg(f"parallel download error: {e}", "yellow")
+
+    async def parallel_download(self, mid: int, hdr: dict) -> bool:
+        """Fetch one file over several circuits at once. True if it worked."""
+        streams = self.stream_count()
+        size = int(hdr["size"])
+        if streams < 2 or size < 4 * 1024 * 1024:
+            return False
+        sessions = await self.extra_circuits(streams - 1)
+        if not sessions:
+            return False
+        self.sys_msg(f"downloading over {len(sessions) + 1} circuits…",
+                     "bright_black")
+        dl = self.srv.get("download")
+        if dl is None:
+            return False
+        sink = dl["sink"]
+        n = len(sessions) + 1
+        span = size // n
+        bounds = [(i * span, size if i == n - 1 else (i + 1) * span)
+                  for i in range(n)]
+        done = 0
+        lock = asyncio.Lock()
+
+        async def pull(sess, start, end):
+            nonlocal done
+            await sess.send({"t": "fetch", "id": mid, "start": start, "end": end})
+            while True:
+                msg = await asyncio.wait_for(sess.recv(), timeout=300)
+                if msg["t"] != "mgchunk":
+                    continue
+                data = msg.get("bin")
+                if data is None:
+                    continue
+                async with lock:
+                    sink.write(data, offset=int(msg.get("off", start)))
+                    done += len(data)
+                    self.transfer_progress(done)
+                start += len(data)
+                if start >= end:
+                    return
+
+        try:
+            # the main session takes the first slice, the extra circuits the rest
+            tasks = [asyncio.create_task(pull(self.session, *bounds[0]))]
+            for sess, (a, b) in zip(sessions, bounds[1:]):
+                tasks.append(asyncio.create_task(pull(sess, a, b)))
+            await asyncio.gather(*tasks)
+        except Exception as e:
+            self.sys_msg(f"parallel download failed ({e}) — falling back", "yellow")
+            return False
+        finally:
+            for sess in sessions:
+                await sess.close()
+        return True
 
     async def server_fetch(self, arg: str) -> None:
         if not self._srv_ready():

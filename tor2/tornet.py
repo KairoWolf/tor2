@@ -77,7 +77,9 @@ class TorNet:
 
         self.process = stem.process.launch_tor_with_config(
             config={
-                "SocksPort": f"127.0.0.1:{self.socks_port}",
+                # IsolateSOCKSAuth (on by default) puts each username/password
+                # on its own circuit — that is what makes parallel transfers work.
+                "SocksPort": f"127.0.0.1:{self.socks_port} IsolateSOCKSAuth",
                 "ControlPort": f"127.0.0.1:{self.control_port}",
                 "DataDirectory": str(self.data_dir),
                 "CookieAuthentication": "1",
@@ -150,16 +152,36 @@ class TorNet:
                 pass
         self.code_service_id = None
 
-    async def dial(self, onion: str, port: int = 80):
-        """Connect to a peer's onion service through our SOCKS5 port."""
+    async def dial(self, onion: str, port: int = 80, stream: str = ""):
+        """Connect to a peer's onion service through our SOCKS5 port.
+
+        `stream` names an isolation group: tor gives connections with
+        different SOCKS credentials their own circuits, so several named
+        streams to the same service transfer in parallel instead of sharing
+        one circuit's bandwidth.
+        """
         reader, writer = await asyncio.open_connection("127.0.0.1", self.socks_port)
         try:
-            # SOCKS5 greeting, no auth
-            writer.write(b"\x05\x01\x00")
-            await writer.drain()
-            resp = await reader.readexactly(2)
-            if resp != b"\x05\x00":
-                raise ConnectionError("SOCKS5 handshake refused")
+            if stream:
+                user = stream.encode()[:255]
+                writer.write(b"\x05\x01\x02")          # offer username/password
+                await writer.drain()
+                resp = await reader.readexactly(2)
+                if resp != b"\x05\x02":
+                    raise ConnectionError("tor refused SOCKS authentication")
+                writer.write(b"\x01" + bytes([len(user)]) + user
+                             + bytes([len(user)]) + user)
+                await writer.drain()
+                auth = await reader.readexactly(2)
+                if auth[1] != 0x00:
+                    raise ConnectionError("SOCKS5 auth rejected")
+            else:
+                # SOCKS5 greeting, no auth
+                writer.write(b"\x05\x01\x00")
+                await writer.drain()
+                resp = await reader.readexactly(2)
+                if resp != b"\x05\x00":
+                    raise ConnectionError("SOCKS5 handshake refused")
             # CONNECT by domain name (tor resolves .onion itself)
             host = onion.encode()
             writer.write(b"\x05\x01\x00\x03" + bytes([len(host)]) + host
