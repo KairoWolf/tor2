@@ -99,3 +99,14 @@ class FramingTest {
 
     private var bSession: Session? = null
 }
+
+class NullStringTest {
+    @org.junit.Test
+    fun `a json null never becomes the string null`() {
+        val j = org.json.JSONObject("""{"token":null,"name":"x","blank":""}""")
+        org.junit.Assert.assertNull(j.optStringOrNull("token"))
+        org.junit.Assert.assertNull(j.optStringOrNull("missing"))
+        org.junit.Assert.assertNull(j.optStringOrNull("blank"))
+        org.junit.Assert.assertEquals("x", j.optStringOrNull("name"))
+    }
+}

@@ -81,3 +81,16 @@ fun mediaFrom(json: JSONObject?): MediaInfo? {
             ?.let { android.util.Base64.decode(it, android.util.Base64.DEFAULT) },
     )
 }
+
+
+/**
+ * Android's JSON turns a null into the string "null" rather than nothing,
+ * which silently overwrote a saved login token with four useless characters
+ * and locked the phone out of its own server. Always read optional strings
+ * through this.
+ */
+fun org.json.JSONObject.optStringOrNull(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    val value = optString(key, "")
+    return if (value.isBlank() || value == "null") null else value
+}

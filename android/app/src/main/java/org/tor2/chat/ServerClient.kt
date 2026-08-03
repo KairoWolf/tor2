@@ -89,7 +89,7 @@ class ServerClient(
                 put("nick", nick)
                 put("invite", invite)
                 put("code", joinCode)
-                put("token", saved.token)
+                put("token", saved.token.takeIf { it != "null" } ?: "")
             })
             loop = scope.launch { receiveLoop(s) }
             scope.launch { keepalive(s) }
@@ -171,11 +171,11 @@ class ServerClient(
         when (frame.type) {
             "authok" -> {
                 isAdmin.value = j.optBoolean("admin")
-                val token = j.optString("token", "")
+                val token = j.optStringOrNull("token") ?: ""
                 // A join code's address is temporary — it stops working once
                 // the code is spent — so save the permanent one the server
                 // reports, or reconnecting later would reach nothing.
-                val real = j.optString("address", "").ifBlank { saved.onion }
+                val real = j.optStringOrNull("address") ?: saved.onion
                 permanentAddress = real
                 if (token.isNotEmpty() || real != saved.onion) {
                     store.saveServer(saved.copy(
@@ -270,7 +270,7 @@ class ServerClient(
     val mentionAlert = MutableStateFlow<String?>(null)
 
     private fun toMessage(j: JSONObject, chan: String): Message {
-        val body = if (j.isNull("body")) null else j.optString("body")
+        val body = j.optStringOrNull("body")
         val who = j.optString("nick")
         return Message(
             id = if (j.isNull("id")) null else j.optInt("id"),

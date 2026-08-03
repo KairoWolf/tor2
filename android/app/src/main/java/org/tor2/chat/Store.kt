@@ -26,7 +26,9 @@ class Store(context: Context) {
     fun servers(): List<SavedServer> = read(serversFile).let { json ->
         json.keys().asSequence().map { key ->
             val o = json.getJSONObject(key)
-            SavedServer(key, o.optString("onion"), o.optString("token"),
+            SavedServer(key, o.optString("onion"),
+                        // repair entries poisoned by the "null" bug
+                        o.optString("token").takeIf { it != "null" } ?: "",
                         o.optString("name", key))
         }.toList()
     }

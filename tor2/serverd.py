@@ -320,7 +320,8 @@ class Tor2Server:
         c.channel = self.db.channels()[0]
         self.clients.add(c)
         c.enqueue({"t": "authok", "nick": c.nick, "admin": c.is_admin,
-                   "token": new_token, "channels": self.db.channels(),
+                   # never null: some JSON libraries stringify it as "null"
+                   "token": new_token or "", "channels": self.db.channels(),
                    "channel": c.channel, "server": self.name,
                    # A join code's address is temporary and disappears once the
                    # code is spent, so tell the client the permanent one to
