@@ -438,13 +438,15 @@ def main(argv: list[str] | None = None) -> int:
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    stop = loop.create_future()
+    task = loop.create_task(server.start())
+    # Cancel the *serving* task, not a placeholder future — otherwise SIGTERM
+    # is silently ignored and `systemctl restart` blocks until it gives up
+    # and SIGKILLs us.
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, lambda: stop.cancel())
-        except NotImplementedError:
+            loop.add_signal_handler(sig, task.cancel)
+        except NotImplementedError:  # non-Unix
             pass
-    task = loop.create_task(server.start())
     try:
         loop.run_until_complete(task)
     except (KeyboardInterrupt, asyncio.CancelledError):

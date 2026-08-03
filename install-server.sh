@@ -80,8 +80,10 @@ write_unit() {  # $1 = target path, $2 = WantedBy target
   cat > "$1" <<UNIT
 [Unit]
 Description=tor2 server (encrypted chat over Tor)
-After=network-online.target
-Wants=network-online.target
+# Ordering only — deliberately no Wants=network-online.target: pulling that
+# target in hangs indefinitely on hosts without a wait-online service (LXC
+# containers especially). Tor retries on its own if the network is late.
+After=network.target
 
 [Service]
 Type=simple
@@ -89,6 +91,8 @@ ExecStart=$SERVER_BIN $DATA_DIR --name $SERVER_NAME
 WorkingDirectory=$REPO_DIR
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=20
+KillMode=mixed
 NoNewPrivileges=true
 PrivateTmp=true
 
@@ -105,9 +109,10 @@ elif [ "$(id -u)" -eq 0 ]; then
   say "installing system-wide systemd service"
   write_unit "$SYSTEM_UNIT" "multi-user.target"
   # Not fatal: if systemd refuses, the manual command is printed below.
-  if systemctl daemon-reload 2>/dev/null \
-     && systemctl enable tor2-server.service >/dev/null 2>&1 \
-     && systemctl restart tor2-server.service 2>/dev/null; then
+  # --no-block and timeouts so a wedged systemd job can never hang the install.
+  if timeout 60 systemctl daemon-reload 2>/dev/null \
+     && timeout 60 systemctl enable tor2-server.service >/dev/null 2>&1 \
+     && timeout 60 systemctl restart --no-block tor2-server.service 2>/dev/null; then
     SCOPE="system"
   else
     warn "system service could not be started — run the daemon manually (below)"
@@ -116,9 +121,9 @@ else
   say "installing systemd user service"
   mkdir -p "$UNIT_DIR"
   write_unit "$UNIT_FILE" "default.target"
-  if systemctl --user daemon-reload 2>/dev/null \
-     && systemctl --user enable tor2-server.service >/dev/null 2>&1 \
-     && systemctl --user restart tor2-server.service 2>/dev/null; then
+  if timeout 60 systemctl --user daemon-reload 2>/dev/null \
+     && timeout 60 systemctl --user enable tor2-server.service >/dev/null 2>&1 \
+     && timeout 60 systemctl --user restart --no-block tor2-server.service 2>/dev/null; then
     SCOPE="user"
     RUN_USER="${USER:-$(id -un)}"   # $USER is unset in containers and cron
     loginctl enable-linger "$RUN_USER" >/dev/null 2>&1 || warn \
