@@ -52,7 +52,8 @@ SERVER_C2S = {
     "auth",       # invite code or saved token + nick
     "post",       # text message to a channel
     "switch",     # change active channel
-    "history",    # request recent messages for a channel
+    "history",    # request recent messages for a channel (before= pages back)
+    "del",        # delete a message you posted (admins: anyone's)
     "mput",       # announce a media upload (kind, size, sha256, chunks)
     "mchunk",     # a chunk of the announced upload
     "fetch",      # request a stored media blob by id
@@ -69,6 +70,7 @@ SERVER_S2C = {
     "members",    # roster / presence update
     "mget",       # media download header
     "mgchunk",    # a chunk of a media download
+    "deleted",    # a message id that is now gone
     "srverr",     # human-readable error
 }
 

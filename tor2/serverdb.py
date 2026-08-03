@@ -252,16 +252,38 @@ class ServerDB:
             (cid, cid, HISTORY_PER_CHANNEL))
         self.db.commit()
 
-    def history(self, channel: str, limit: int = 50) -> list[dict]:
+    def history(self, channel: str, limit: int = 50,
+                before: int | None = None) -> list[dict]:
+        """Newest `limit` messages, or the ones just before `before` for paging."""
         cid = self.channel_id(channel)
         if cid is None:
             return []
-        rows = self.db.execute(
-            "SELECT * FROM messages WHERE channel_id=? ORDER BY id DESC LIMIT ?",
-            (cid, min(limit, HISTORY_PER_CHANNEL))).fetchall()
+        if before:
+            rows = self.db.execute(
+                "SELECT * FROM messages WHERE channel_id=? AND id<? "
+                "ORDER BY id DESC LIMIT ?",
+                (cid, before, min(limit, HISTORY_PER_CHANNEL))).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM messages WHERE channel_id=? ORDER BY id DESC LIMIT ?",
+                (cid, min(limit, HISTORY_PER_CHANNEL))).fetchall()
         return [{"id": r["id"], "chan": channel, "nick": r["nick"], "ts": r["ts"],
                  "body": r["body"], "media": self.media_info(r["media_id"])}
                 for r in reversed(rows)]
+
+    def message(self, msg_id: int) -> dict | None:
+        r = self.db.execute("SELECT * FROM messages WHERE id=?", (msg_id,)).fetchone()
+        if r is None:
+            return None
+        chan = self.db.execute("SELECT name FROM channels WHERE id=?",
+                               (r["channel_id"],)).fetchone()
+        return {"id": r["id"], "member_id": r["member_id"], "nick": r["nick"],
+                "chan": chan["name"] if chan else "", "media_id": r["media_id"]}
+
+    def delete_message(self, msg_id: int) -> bool:
+        cur = self.db.execute("DELETE FROM messages WHERE id=?", (msg_id,))
+        self.db.commit()
+        return cur.rowcount > 0
 
     # ---------- media ----------
 

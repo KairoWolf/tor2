@@ -7,6 +7,7 @@ logic so the two flows stay easy to read independently.
 import asyncio
 import base64
 import hashlib
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -26,11 +27,23 @@ HANDSHAKE_TIMEOUT = 60
 
 
 class ChannelItem(Static):
-    """One clickable channel row in the sidebar."""
+    """One clickable channel row in the sidebar, with an unread badge."""
 
     def __init__(self, channel: str):
-        super().__init__(f"# {channel}", classes="chan")
+        super().__init__(classes="chan")
         self.channel = channel
+        self.render_row(0, False)
+
+    def render_row(self, unread: int, mentioned: bool) -> None:
+        self.unread, self.mentioned = unread, mentioned
+        t = Text()
+        t.append(f"# {self.channel[:14]}")
+        if mentioned:
+            t.append("  @", style="bold red")
+        elif unread:
+            t.append(f"  {unread if unread < 100 else '99+'}", style="bold yellow")
+        self.row_text = t.plain
+        self.update(t)
 
     def on_click(self) -> None:
         self.app.run_worker(self.app.server_switch(self.channel), exclusive=False)
@@ -78,22 +91,26 @@ class ServerModeMixin:
                                    local_name=name)
 
     async def _connect_server(self, onion: str, invite: str = "", token: str = "",
-                              local_name: str = "") -> None:
+                              local_name: str = "", quiet: bool = False) -> None:
         if self.session is not None:
             self.sys_msg("already in a session — /disconnect first", "red")
             return
-        self.sys_msg(f"connecting to server {onion[:16]}… (can take ~15s)")
+        self.manual_disconnect = False
+        if not quiet:
+            self.sys_msg(f"connecting to server {onion[:16]}… (can take ~15s)")
         try:
             reader, writer = await self.tor.dial(onion)
             session = await proto.handshake(reader, writer)
         except Exception as e:
-            self.sys_msg(f"connection failed: {e}", "red")
+            if not quiet:
+                self.sys_msg(f"connection failed: {e}", "red")
             return
         try:
             hello = await asyncio.wait_for(session.recv(), timeout=HANDSHAKE_TIMEOUT)
         except Exception as e:
             await session.close()
-            self.sys_msg(f"no response from server: {e}", "red")
+            if not quiet:
+                self.sys_msg(f"no response from server: {e}", "red")
             return
         if hello.get("t") != "srvhello":
             await session.close()
@@ -114,6 +131,7 @@ class ServerModeMixin:
     async def server_loop(self, session: proto.Session) -> None:
         self.touch_rx()
         self.run_worker(self.keepalive(session), group="net", exclusive=False)
+        lost = False
         try:
             while True:
                 msg = await session.recv()
@@ -125,13 +143,43 @@ class ServerModeMixin:
                 await self.handle_server_msg(msg)
         except (asyncio.IncompleteReadError, ConnectionError):
             if self.session is session:
-                self.sys_msg("disconnected from server", "red")
+                self.sys_msg("connection to the server dropped", "red")
+                lost = True
         except Exception as e:
             if self.session is session:
                 self.sys_msg(f"server session error: {e}", "red")
+                lost = True
         finally:
             if self.session is session:
+                entry = {"onion": self.srv.get("onion"),
+                         "local": self.srv.get("local")}
                 await self.drop_session()
+                # Tor circuits die routinely; get back on by ourselves rather
+                # than making the user retype /server.
+                if lost and entry["onion"] and not self.manual_disconnect:
+                    self.run_worker(self.reconnect_loop(entry), group="net",
+                                    exclusive=False)
+
+    async def reconnect_loop(self, entry: dict) -> None:
+        """Retry a dropped server session with backoff until it works."""
+        delays = [5, 10, 20, 40, 60, 120]
+        for attempt, delay in enumerate(delays, 1):
+            await asyncio.sleep(delay)
+            if self.session is not None or self.manual_disconnect:
+                return
+            saved = store.load_servers().get(entry["local"] or "", {})
+            token = saved.get("token", "")
+            if not token:
+                self.sys_msg("cannot reconnect automatically without a saved "
+                             "membership — use /joinserver", "red")
+                return
+            self.sys_msg(f"reconnecting… (attempt {attempt} of {len(delays)})")
+            await self._connect_server(entry["onion"], token=token,
+                                       local_name=entry["local"] or "",
+                                       quiet=True)
+            if self.session is not None:
+                return
+        self.sys_msg("could not reconnect — use /server to try again", "red")
 
     # ---------- incoming ----------
 
@@ -149,6 +197,8 @@ class ServerModeMixin:
             self.refresh_sidebar()
         elif kind == "srverr":
             self.sys_msg(str(msg.get("msg", ""))[:400], "yellow")
+        elif kind == "deleted":
+            self.srv_deleted(msg)
         elif kind == "mget":
             self.srv_mget(msg)
         elif kind == "mgchunk":
@@ -186,16 +236,42 @@ class ServerModeMixin:
     def srv_histbatch(self, msg: dict) -> None:
         chan = str(msg.get("chan", ""))
         buf = self.srv["buffers"].setdefault(chan, [])
+        msgs = msg.get("msgs", [])
+        if msg.get("append"):          # an older page from /more
+            if not msgs:
+                self.sys_msg("no older messages", "bright_black")
+                return
+            self.srv.setdefault("oldest", {})[chan] = msgs[0].get("id")
+            older = []
+            for m in msgs:
+                hit = (str(m.get("nick")) != self.nick
+                       and self.mentions_me(str(m.get("body") or "")))
+                older.append(self.render_event(m, historic=True, mentioned=hit))
+            buf[:0] = older
+            if chan == self.srv["channel"]:
+                self.redraw_channel()
+                self.sys_msg(f"loaded {len(older)} older messages", "bright_black")
+            return
         buf.clear()
-        for m in msg.get("msgs", [])[-200:]:
-            buf.append(self.render_event(m, historic=True))
+        if msgs:
+            self.srv.setdefault("oldest", {})[chan] = msgs[0].get("id")
+        for m in msgs[-200:]:
+            hit = (str(m.get("nick")) != self.nick
+                   and self.mentions_me(str(m.get("body") or "")))
+            buf.append(self.render_event(m, historic=True, mentioned=hit))
         if chan == self.srv["channel"]:
             self.redraw_channel()
 
     def srv_event(self, msg: dict) -> None:
         chan = str(msg.get("chan", ""))
-        line = self.render_event(msg)
+        mine = str(msg.get("nick")) == self.nick
+        mentioned = (not mine) and self.mentions_me(str(msg.get("body") or ""))
+        line = self.render_event(msg, mentioned=mentioned)
         self.srv["buffers"].setdefault(chan, []).append(line)
+        if mentioned:
+            self.bell()
+            if chan != self.srv["channel"]:
+                self.sys_msg(f"{msg.get('nick')} mentioned you in #{chan}", "red")
         if chan == self.srv["channel"]:
             self.chat.write(line)
             inline = msg.get("inline")
@@ -203,8 +279,28 @@ class ServerModeMixin:
                 self.render_inline_image(msg, inline)
             else:
                 self.render_thumb(msg.get("media"))
-        elif str(msg.get("nick")) != self.nick:
-            self.sys_msg(f"new message in #{chan}", "bright_black")
+        elif not mine:
+            counts = self.srv.setdefault("unread", {})
+            counts[chan] = counts.get(chan, 0) + 1
+            if mentioned:
+                self.srv.setdefault("mentions", set()).add(chan)
+            self.mark_active_channel()
+
+    def srv_deleted(self, msg: dict) -> None:
+        chan = str(msg.get("chan", ""))
+        self.sys_msg(f"message {msg.get('id')} deleted by {msg.get('by')} "
+                     f"in #{chan}", "bright_black")
+        # cheapest correct refresh: ask the server for the channel again
+        if chan == self.srv.get("channel") and self.session is not None:
+            self.run_worker(self.session.send({"t": "history", "chan": chan}),
+                            exclusive=False)
+
+    def mentions_me(self, body: str) -> bool:
+        """@nick, or the bare nick as a whole word."""
+        if not body:
+            return False
+        nick = re.escape(self.nick)
+        return bool(re.search(rf"(?<![\w@])@?{nick}\b", body, re.IGNORECASE))
 
     def render_thumb(self, info: dict | None) -> None:
         """Preview a video from the small thumbnail its sender attached, so
@@ -221,11 +317,14 @@ class ServerModeMixin:
         except Exception:
             pass
 
-    def render_event(self, m: dict, historic: bool = False) -> Text:
+    def render_event(self, m: dict, historic: bool = False,
+                     mentioned: bool = False) -> Text:
         ts = time.strftime("%H:%M", time.localtime(m.get("ts", time.time())))
         nick = str(m.get("nick", "?"))[:32]
         t = Text()
         t.append(f"{ts} ", style="bright_black")
+        if m.get("id") is not None:
+            t.append(f"[{m['id']}] ", style="bright_black")
         t.append(f"{nick} ", style="bold cyan" if nick == self.nick else "bold magenta")
         t.append("▸ ", style="bright_black")
         info = m.get("media")
@@ -234,7 +333,11 @@ class ServerModeMixin:
             t.append(f"[{kind} · {fmt_size(info.get('size', 0))}] ", style="magenta")
             t.append(f"/get {info.get('id')}", style="bold cyan")
         else:
-            t.append(str(m.get("body", "")))
+            body = str(m.get("body", ""))
+            if mentioned:
+                t.append(body, style="bold on #4a3000")
+            else:
+                t.append(body)
         return t
 
     def render_inline_image(self, msg: dict, inline: str) -> None:
@@ -354,6 +457,8 @@ class ServerModeMixin:
         if chan == self.srv.get("channel"):
             return
         self.srv["channel"] = chan
+        self.srv.setdefault("unread", {}).pop(chan, None)
+        self.srv.setdefault("mentions", set()).discard(chan)
         await self.session.send({"t": "switch", "chan": chan})
         self.redraw_channel()
         self.mark_active_channel()
@@ -417,6 +522,28 @@ class ServerModeMixin:
             self.update_server_status()
         self.sys_msg("uploaded ✓ — the server will confirm or reject it", "green")
 
+    async def server_more(self) -> None:
+        """/more — page further back into stored history."""
+        if not self._srv_ready():
+            return
+        chan = self.srv["channel"]
+        oldest = self.srv.get("oldest", {}).get(chan)
+        if not oldest:
+            self.sys_msg("nothing loaded yet", "red")
+            return
+        await self.session.send({"t": "history", "chan": chan, "before": oldest})
+
+    async def server_delete(self, arg: str) -> None:
+        """/del <id> — remove a message (yours, or anyone's if admin)."""
+        if not self._srv_ready():
+            return
+        try:
+            mid = int(arg.strip())
+        except ValueError:
+            self.sys_msg("usage: /del <message id>", "red")
+            return
+        await self.session.send({"t": "del", "id": mid})
+
     async def server_fetch(self, arg: str) -> None:
         if not self._srv_ready():
             return
@@ -461,8 +588,14 @@ class ServerModeMixin:
         self.mark_active_channel()
 
     def mark_active_channel(self) -> None:
+        active = self.srv.get("channel")
+        counts = self.srv.get("unread", {})
+        mentions = self.srv.get("mentions", set())
         for w in self.query(ChannelItem):
-            w.set_class(w.channel == self.srv.get("channel"), "-active")
+            is_active = w.channel == active
+            w.set_class(is_active, "-active")
+            w.render_row(0 if is_active else counts.get(w.channel, 0),
+                         (not is_active) and w.channel in mentions)
 
     def cycle_channel(self, delta: int) -> None:
         """Arrow-key channel switching, so the input bar keeps focus."""

@@ -16,6 +16,7 @@ import logging
 import re
 import shutil
 import signal
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -28,6 +29,8 @@ log = logging.getLogger("tor2.server")
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "tor2-server"
 HISTORY_ON_JOIN = 50
 UPDATE_CHECK_INTERVAL = 24 * 60 * 60
+RATE_WINDOW = 10.0        # seconds
+RATE_MAX = 15             # messages per window per member
 
 
 def clean_nick(raw: str) -> str:
@@ -45,6 +48,7 @@ class Client:
         self.is_admin = False
         self.channel = "general"
         self.upload: dict | None = None
+        self.recent: list[float] = []      # timestamps, for flood control
         self.out: asyncio.Queue = asyncio.Queue(maxsize=128)
 
     @property
@@ -182,6 +186,7 @@ class Tor2Server:
             "mput": self.do_mput,
             "mchunk": self.do_mchunk,
             "fetch": self.do_fetch,
+            "del": self.do_delete,
             "mkchan": self.do_mkchan,
             "rmchan": self.do_rmchan,
             "newinvite": self.do_newinvite,
@@ -240,10 +245,24 @@ class Tor2Server:
 
     # ---------- chat ----------
 
+    def rate_limited(self, c: Client) -> bool:
+        """Stop one member flooding history out of existence."""
+        now = asyncio.get_event_loop().time()
+        c.recent = [t for t in c.recent if now - t < RATE_WINDOW]
+        if len(c.recent) >= RATE_MAX:
+            return True
+        c.recent.append(now)
+        return False
+
     async def do_post(self, c: Client, msg: dict) -> None:
         body = str(msg.get("body", ""))[:4000].strip()
         chan = str(msg.get("chan", c.channel))
         if not body or self.db.channel_id(chan) is None:
+            return
+        if self.rate_limited(c):
+            c.enqueue({"t": "srverr", "msg":
+                       f"slow down — max {RATE_MAX} messages per "
+                       f"{int(RATE_WINDOW)} seconds"})
             return
         stored = self.db.add_message(chan, c.member_id, c.nick, body)
         self.broadcast({"t": "event", **stored})
@@ -260,8 +279,12 @@ class Tor2Server:
 
     async def do_history(self, c: Client, msg: dict) -> None:
         chan = str(msg.get("chan", c.channel))
-        c.enqueue({"t": "histbatch", "chan": chan,
-                   "msgs": self.db.history(chan, HISTORY_ON_JOIN)})
+        try:
+            before = int(msg.get("before") or 0) or None
+        except (TypeError, ValueError):
+            before = None
+        c.enqueue({"t": "histbatch", "chan": chan, "append": bool(before),
+                   "msgs": self.db.history(chan, HISTORY_ON_JOIN, before=before)})
 
     # ---------- media ----------
 
@@ -389,6 +412,23 @@ class Tor2Server:
                                           "data": base64.b64encode(chunk).decode()})
         except (OSError, ConnectionError, asyncio.CancelledError) as e:
             log.info("media #%s stream to %s ended: %s", mid, c.nick, e)
+
+    async def do_delete(self, c: Client, msg: dict) -> None:
+        try:
+            mid = int(msg.get("id", 0))
+        except (TypeError, ValueError):
+            return
+        row = self.db.message(mid)
+        if row is None:
+            c.enqueue({"t": "srverr", "msg": f"no message {mid}"})
+            return
+        if row["member_id"] != c.member_id and not c.is_admin:
+            c.enqueue({"t": "srverr", "msg": "you can only delete your own messages"})
+            return
+        self.db.delete_message(mid)
+        log.info("%s deleted message %s", c.nick, mid)
+        self.broadcast({"t": "deleted", "id": mid, "chan": row["chan"],
+                        "by": c.nick})
 
     # ---------- admin ----------
 
@@ -637,6 +677,45 @@ class Tor2Server:
         return sorted({cl.nick for cl in self.clients if cl.authed})
 
 
+def make_backup(data_dir: Path, dest: Path) -> Path:
+    """Archive the database, onion key and media into one .tar.gz.
+
+    Restoring is just untarring it back over an empty data directory: the
+    server keeps its address, channels, members and history.
+    """
+    import tarfile
+
+    if dest.is_dir():
+        dest = dest / "tor2-server-backup.tar.gz"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    db_file = data_dir / "server.db"
+    tmp_db = data_dir / "server.db.backup"
+    if db_file.is_file():
+        # sqlite3's own backup API: consistent even while the server is running
+        src = sqlite3.connect(db_file)
+        snap = sqlite3.connect(tmp_db)
+        with snap:
+            src.backup(snap)
+        snap.close()
+        src.close()
+    try:
+        with tarfile.open(dest, "w:gz") as tar:
+            if tmp_db.is_file():
+                tar.add(tmp_db, arcname="server.db")
+            for name in ("onion.key",):
+                p = data_dir / name
+                if p.is_file():
+                    tar.add(p, arcname=name)
+            media_dir = data_dir / "media"
+            if media_dir.is_dir():
+                tar.add(media_dir, arcname="media")
+    finally:
+        tmp_db.unlink(missing_ok=True)
+    dest.chmod(0o600)
+    return dest
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m tor2.server",
                                  description="Run a self-hosted tor2 server.")
@@ -651,6 +730,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="print this server's onion address and exit")
     ap.add_argument("--info", action="store_true",
                     help="print address, name, channels and member count, then exit")
+    ap.add_argument("--backup", metavar="DEST",
+                    help="write a restorable backup archive and exit")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO,
@@ -664,6 +745,17 @@ def main(argv: list[str] | None = None) -> int:
         db = ServerDB(data_dir)
         print(db.create_invite(uses=1, is_admin=args.admin_invite))
         db.close()
+        return 0
+
+    if args.backup:
+        try:
+            dest = make_backup(data_dir, Path(args.backup).expanduser())
+        except Exception as e:
+            print(f"backup failed: {e}", file=sys.stderr)
+            return 1
+        print(dest)
+        print("Contains the onion identity key — keep it as safe as the server "
+              "itself.", file=sys.stderr)
         return 0
 
     if args.address or args.info:

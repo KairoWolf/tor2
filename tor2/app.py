@@ -110,6 +110,7 @@ class Tor2App(ServerModeMixin, App):
         self._anim_timer = None
         self._anim: dict | None = None
         self.last_rx = 0.0
+        self.manual_disconnect = False
 
     # ---------- layout ----------
 
@@ -822,6 +823,7 @@ class Tor2App(ServerModeMixin, App):
                 store.save_config(cfg)
                 self.sys_msg(f"you are now “{self.nick}” (saved; applies to new sessions)")
             case "/disconnect":
+                self.manual_disconnect = True
                 await self.drop_session()
                 self.sys_msg("disconnected")
             case "/help":
@@ -867,6 +869,10 @@ class Tor2App(ServerModeMixin, App):
                                 exclusive=False)
             case "/get":
                 await self.server_fetch(arg)
+            case "/more":
+                await self.server_more()
+            case "/del" | "/delete":
+                await self.server_delete(arg)
             case "/play":
                 await self.cmd_play(arg)
             case "/save":
@@ -877,6 +883,7 @@ class Tor2App(ServerModeMixin, App):
                 else:
                     await self.server_admin(cmd, arg)
             case "/leave":
+                self.manual_disconnect = True
                 name = self.srv.get("local", "")
                 await self.drop_session()
                 if name and store.remove_server(name):
@@ -891,6 +898,8 @@ class Tor2App(ServerModeMixin, App):
                     "/vid <path>        — post a video (others download with /get)",
                     "/big-vid <path>    — post a long video (any length, ≤3 GB)",
                     "/get <id>          — download a posted image or video",
+                    "/more              — load older messages",
+                    "/del <id>          — delete your message (admins: any)",
                     "/save [id] · /play [id] — keep or replay a previewed image",
                     "/disconnect        — go back to direct-message mode",
                     "/leave             — disconnect and forget this server",
@@ -941,6 +950,7 @@ class Tor2App(ServerModeMixin, App):
         self.cycle_channel(1)
 
     async def action_quit(self) -> None:
+        self.manual_disconnect = True
         await self.stop_code()
         await self.drop_session()
         if self._server:
