@@ -81,9 +81,20 @@ class MainActivity : AppCompatActivity() {
     private fun launchAudioPicker() = pickAudio.launch("audio/*")
 
     private fun sendPicked(uri: Uri, kind: String) {
-        val name = queryName(uri)
-        val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return
-        if (kind == "img") vm.sendImage(bytes, name) else vm.sendFile(bytes, name, kind)
+        // a chosen video can be hundreds of megabytes: never read it on the
+        // main thread
+        lifecycleScope.launch(Dispatchers.IO) {
+            val name = queryName(uri)
+            val bytes = runCatching {
+                contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            }.getOrNull()
+            if (bytes == null || bytes.isEmpty()) {
+                vm.banner.value = "Could not read that file"
+                return@launch
+            }
+            if (kind == "img") vm.sendImage(bytes, name)
+            else vm.sendFile(bytes, name, kind)
+        }
     }
 
     private fun queryName(uri: Uri): String {

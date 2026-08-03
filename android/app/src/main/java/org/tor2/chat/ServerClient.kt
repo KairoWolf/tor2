@@ -353,7 +353,16 @@ class ServerClient(
 
     suspend fun sendMedia(bytes: ByteArray, kind: String, ext: String, name: String,
                           thumb: ByteArray? = null) = withContext(Dispatchers.IO) {
-        val s = session ?: return@withContext
+        val s = session
+        if (s == null) {
+            notice.value = "Not connected — cannot send ${name.ifBlank { kind }}"
+            return@withContext
+        }
+        if (bytes.isEmpty()) {
+            notice.value = "That file is empty"
+            return@withContext
+        }
+        android.util.Log.i("tor2", "uploading $kind $name ${bytes.size} bytes")
         val sha = Crypto.hex(Crypto.sha256(bytes))
         val chunk = Protocol.chunkSizeFor(bytes.size.toLong())
         val chunks = maxOf(1, (bytes.size + chunk - 1) / chunk)
@@ -365,15 +374,22 @@ class ServerClient(
             put("size", bytes.size); put("chunks", chunks); put("sha256", sha)
             if (thumb != null) put("thumb", Base64.encodeToString(thumb, Base64.NO_WRAP))
         })
-        var off = 0
-        while (off < bytes.size) {
-            val n = minOf(chunk, bytes.size - off)
-            s.sendBinary(JSONObject().apply { put("t", "mchunk"); put("off", off) },
-                         bytes, off, n)
-            off += n
-            transfer.value = transfer.value.copy(done = off.toLong())
+        try {
+            var off = 0
+            while (off < bytes.size) {
+                val n = minOf(chunk, bytes.size - off)
+                s.sendBinary(JSONObject().apply { put("t", "mchunk"); put("off", off) },
+                             bytes, off, n)
+                off += n
+                transfer.value = transfer.value.copy(done = off.toLong())
+            }
+            notice.value = "Sent ${name.ifBlank { kind }} — waiting for the server"
+        } catch (e: Exception) {
+            android.util.Log.w("tor2", "upload of $name failed", e)
+            notice.value = "Upload failed: ${e.message ?: "connection lost"}"
+        } finally {
+            transfer.value = TransferState()
         }
-        transfer.value = TransferState()
     }
 
     /**

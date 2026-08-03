@@ -136,6 +136,8 @@ fun MainScreen(vm: AppViewModel) {
     if (showMembers) client?.let { MembersSheet(it) { showMembers = false } }
     if (showAdmin) client?.let { AdminSheet(vm, it) { showAdmin = false } }
     PreviewOverlay(client)
+    val playing by vm.playing.collectAsState()
+    PlayerOverlay(playing?.first, playing?.second ?: "") { vm.closePlayer() }
 }
 
 /** Tor takes a little while; make the wait feel deliberate rather than broken. */

@@ -302,16 +302,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun openMedia(info: MediaInfo) {
         val existing = findDownloaded(info)
         if (existing != null) {
-            if (!OpenMedia.open(getApplication(), existing)) {
-                banner.value = "No app on this phone can open ${info.display}"
-            }
+            playing.value = existing to info.display
             return
         }
         val client = current.value ?: return
-        banner.value = "Downloading ${info.display}…"
+        banner.value = "Fetching ${info.display}…"
         pendingOpen = info.id
+        pendingTitle = info.display
         viewModelScope.launch { client.fetch(info.id) }
     }
+
+    /** The file currently open in the in-app player, with its title. */
+    val playing = MutableStateFlow<Pair<File, String>?>(null)
+
+    fun closePlayer() { playing.value = null }
+
+    private var pendingTitle: String = ""
 
     private var pendingOpen: Int? = null
 
@@ -326,9 +332,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val wanted = pendingOpen ?: return
         if (!file.name.startsWith("media_$wanted.")) return
         pendingOpen = null
-        if (!OpenMedia.open(getApplication(), file)) {
-            banner.value = "Saved, but no app here can open ${file.name}"
-        }
+        banner.value = null
+        playing.value = file to pendingTitle.ifBlank { file.name }
     }
 
     fun deleteMessage(id: Int) {

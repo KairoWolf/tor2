@@ -4,3 +4,8 @@ received/
 __pycache__/
 
 *.egg-info/
+android/build/
+android/app/build/
+android/.gradle/
+android/.kotlin/
+local.properties

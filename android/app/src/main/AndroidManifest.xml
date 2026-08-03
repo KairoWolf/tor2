@@ -28,16 +28,11 @@
             </intent-filter>
         </activity>
 
-        <!-- lets a downloaded video or song open in the phone's own player -->
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.files"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
+        <!--
+            No FileProvider on purpose. Received media plays inside the app and
+            is never handed to another one, so nothing needs a URI into the
+            app's private storage.
+        -->
 
         <service
             android:name="org.torproject.jni.TorService"

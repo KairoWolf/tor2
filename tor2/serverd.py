@@ -1049,6 +1049,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"address:  {onion}")
             print(f"channels: {', '.join('#' + c for c in db.channels())}")
             print(f"members:  {db.member_count()}")
+            used = media.used_fraction(data_dir)
+            free = media.free_space(data_dir)
+            print(f"disk:     {used * 100:.0f}% used, "
+                  f"{free / 1024 / 1024 / 1024:.1f} GB free"
+                  + ("   UPLOADS ARE BLOCKED (over "
+                     f"{proto.SERVER_DISK_LIMIT * 100:.0f}%)"
+                     if used >= proto.SERVER_DISK_LIMIT else ""))
         db.close()
         return 0
 

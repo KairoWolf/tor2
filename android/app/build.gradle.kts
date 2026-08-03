@@ -12,8 +12,8 @@ android {
         applicationId = "org.tor2.chat"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.6.0"
+        versionCode = 13
+        versionName = "0.7.1"
     }
 
     buildTypes {
@@ -51,6 +51,10 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+
+    // in-app playback: media never has to leave the app to be watched
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
 
     // libsodium: the same NaCl primitives the desktop client uses
     implementation("com.goterl:lazysodium-android:5.1.0@aar")
