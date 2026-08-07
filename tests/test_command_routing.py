@@ -129,7 +129,10 @@ def test_server_only_commands_explain_themselves_in_a_dm():
 
 def test_readme_commands_are_all_known():
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
-    documented = set(re.findall(r"`(/[a-z\-]+)", readme))
+    # A trailing slash means it is a path like `/usr/local/bin`, not a command.
+    # The lookahead also has to reject a letter, or the regex just backtracks
+    # to a shorter prefix (`/usr` -> `/us`) and matches the path anyway.
+    documented = set(re.findall(r"`(/[a-z\-]+)(?![a-z\-/])", readme))
     known = set(Tor2App.ALL_COMMANDS) | {"/image", "/video", "/bigvid", "/mp3",
                                          "/config", "/delete", "/channel"}
     assert documented <= known, f"documented but unknown: {documented - known}"

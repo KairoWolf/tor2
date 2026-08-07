@@ -1,0 +1,392 @@
+<title>Join kairos-server</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --paper:   #EFF0EC;
+    --raised:  #E5E7E1;
+    --ink:     #191D1A;
+    --muted:   #656E68;
+    --rule:    #D5D9D2;
+    --accent:  #2C6B58;
+    --accent-soft: #DCE7E1;
+    --warn:    #A8502A;
+    --warn-soft:   #F0E2DA;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:  #111413;
+      --raised: #191E1B;
+      --ink:    #E6E9E4;
+      --muted:  #939C96;
+      --rule:   #262C28;
+      --accent: #62AB8D;
+      --accent-soft: #17251F;
+      --warn:   #D08050;
+      --warn-soft:   #251A14;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:  #111413;
+    --raised: #191E1B;
+    --ink:    #E6E9E4;
+    --muted:  #939C96;
+    --rule:   #262C28;
+    --accent: #62AB8D;
+    --accent-soft: #17251F;
+    --warn:   #D08050;
+    --warn-soft:   #251A14;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 0 20px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 40rem; margin: 0 auto; }
+
+  /* ---- masthead ---- */
+  header { padding: 56px 0 32px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-family: var(--mono);
+    font-size: clamp(1.75rem, 6vw, 2.4rem);
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+    margin: 0 0 16px;
+  }
+  h1 .host { color: var(--accent); }
+  .standfirst {
+    font-size: 1.06rem;
+    color: var(--muted);
+    max-width: 34rem;
+    margin: 0;
+  }
+
+  /* ---- the code ---- */
+  .code-card {
+    margin: 36px 0 8px;
+    border: 1px solid var(--rule);
+    background: var(--raised);
+    padding: 22px 24px 24px;
+  }
+  .code-card .eyebrow { margin-bottom: 10px; }
+  .code-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+  .code {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(1.6rem, 7vw, 2.3rem);
+    letter-spacing: 0.14em;
+    color: var(--accent);
+    margin: 0;
+  }
+  .code.empty { color: var(--muted); letter-spacing: 0.2em; }
+  .code-note { font-size: 0.9rem; color: var(--muted); margin: 12px 0 0; }
+
+  /* ---- steps ---- */
+  .step { border-top: 1px solid var(--rule); padding: 30px 0 4px; }
+  .step-head { display: flex; gap: 14px; align-items: baseline; }
+  .step-num {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+    flex: none;
+    padding-top: 2px;
+  }
+  h2 {
+    font-family: var(--mono);
+    font-size: 1.12rem;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
+  .step-body { padding-left: 2.1rem; }
+  @media (max-width: 30rem) { .step-body { padding-left: 0; } }
+  p { margin: 14px 0; }
+  .lead-in { margin-top: 10px; }
+
+  h3 {
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 28px 0 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  /* ---- commands ---- */
+  .cmd {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: var(--raised);
+    border: 1px solid var(--rule);
+    padding: 12px 12px 12px 14px;
+    margin: 10px 0;
+    overflow-x: auto;
+  }
+  .cmd code {
+    font-family: var(--mono);
+    font-size: 0.88rem;
+    line-height: 1.7;
+    white-space: pre;
+    flex: 1 1 auto;
+    color: var(--ink);
+  }
+  .cmd .prompt { color: var(--muted); user-select: none; }
+  button.copy {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--rule);
+    padding: 5px 9px;
+    cursor: pointer;
+    flex: none;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  button.copy:hover { color: var(--accent); border-color: var(--accent); }
+  button.copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.copy.done { color: var(--accent); border-color: var(--accent); }
+
+  ol.plain, ul.plain { padding-left: 1.2rem; margin: 14px 0; }
+  ol.plain li, ul.plain li { margin: 8px 0; }
+
+  kbd {
+    font-family: var(--mono);
+    font-size: 0.85em;
+    border: 1px solid var(--rule);
+    background: var(--raised);
+    padding: 1px 6px;
+  }
+  a { color: var(--accent); }
+
+  /* ---- notices ---- */
+  .notice {
+    border-left: 2px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 16px 18px;
+    margin: 28px 0;
+  }
+  .notice p { margin: 8px 0; font-size: 0.94rem; }
+  .notice p:first-child { margin-top: 0; }
+  .notice p:last-child { margin-bottom: 0; }
+  .notice .eyebrow { color: var(--accent); margin-bottom: 8px; }
+
+  .notice.legal { border-left-color: var(--warn); background: var(--warn-soft); }
+  .notice.legal .eyebrow { color: var(--warn); }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    margin-top: 44px;
+    padding-top: 20px;
+    font-size: 0.88rem;
+    color: var(--muted);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">Private chat over Tor</p>
+    <h1>You've been invited to <span class="host">kairos-server</span></h1>
+    <p class="standfirst">
+      A chat server with channels, running on a machine Kairo owns rather than
+      a company's. Setting it up takes about five minutes, most of it waiting
+      for a download.
+    </p>
+  </header>
+
+  <div class="code-card">
+    <p class="eyebrow">Your join code</p>
+    <div class="code-row">
+      <p class="code empty" id="code">8 digits</p>
+      <button class="copy" id="copy-code" hidden>Copy</button>
+    </div>
+    <p class="code-note" id="code-note">
+      Everyone joining uses this same code. It's the whole invitation — there's
+      no address, username or password to go with it.
+    </p>
+  </div>
+
+  <section class="step">
+    <div class="step-head">
+      <span class="step-num">01</span>
+      <h2>Install it</h2>
+    </div>
+    <div class="step-body">
+      <p class="lead-in">tor2 runs in a terminal, on Linux or macOS. Paste these
+      in one at a time.</p>
+
+      <h3>First, the things it needs</h3>
+      <div class="cmd"><code><span class="prompt">$ </span>sudo apt install -y tor git python3-venv ffmpeg</code><button class="copy">Copy</button></div>
+      <p>On macOS use <code style="font-family:var(--mono)">brew install tor git python ffmpeg</code> instead.</p>
+
+      <h3>Then tor2 itself</h3>
+      <div class="cmd"><code><span class="prompt">$ </span>git clone https://github.com/KairoWolf/tor2.git
+<span class="prompt">$ </span>cd tor2
+<span class="prompt">$ </span>python3 -m venv .venv
+<span class="prompt">$ </span>.venv/bin/pip install -r requirements.txt</code><button class="copy">Copy</button></div>
+      <p>Start it with:</p>
+      <div class="cmd"><code><span class="prompt">$ </span>.venv/bin/python -m tor2</code><button class="copy">Copy</button></div>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="step-head">
+      <span class="step-num">02</span>
+      <h2>Wait for Tor to connect</h2>
+    </div>
+    <div class="step-body">
+      <p class="lead-in">The first launch takes 30 to 60 seconds while it finds
+      its way onto the Tor network. It says <em>bootstrapping</em> while it
+      works. This only feels slow the first time.</p>
+      <p>You don't need to install Tor Browser or set anything up — tor2 starts
+      its own Tor and shuts it down when you quit.</p>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="step-head">
+      <span class="step-num">03</span>
+      <h2>Enter your code</h2>
+    </div>
+    <div class="step-body">
+      <p class="lead-in">Type this into the message box at the bottom, digits
+      and all:</p>
+      <div class="cmd"><code id="join-cmd">/join 12345678</code><button class="copy">Copy</button></div>
+      <p>That's it — you'll land in <code style="font-family:var(--mono)">#general</code>.
+      Set a name for yourself with <kbd>/nick yourname</kbd>, and
+      <kbd>/help</kbd> lists everything else.</p>
+
+      <div class="notice">
+        <p class="eyebrow">If the code doesn't work</p>
+        <p>A code only works while the server is switched on — it can't be
+        looked up anywhere in advance. If it's refused, the server is probably
+        down rather than the code being wrong. Give it a minute, then tell
+        Kairo.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="step">
+    <div class="step-head">
+      <span class="step-num">04</span>
+      <h2>What this does and doesn't hide</h2>
+    </div>
+    <div class="step-body">
+      <p class="lead-in">Worth knowing before you say anything you'd rather
+      keep private.</p>
+      <ul class="plain">
+        <li><strong>Kairo can read this server.</strong> Messages in channels
+        are decrypted on the server to be delivered and stored — the same as
+        any self-hosted chat. Whoever runs it can read it.</li>
+        <li><strong>One-to-one chats are different.</strong> Those go straight
+        between the two devices with no server in the middle, and nobody else
+        can read them — not even Kairo.</li>
+        <li><strong>Your IP address is hidden</strong> from the server and from
+        other members, because everything travels over Tor.</li>
+        <li><strong>Nothing to sign up for.</strong> No email, no phone number,
+        no account.</li>
+      </ul>
+      <p>The project writes this up honestly, including the weak spots, in its
+      <a href="https://github.com/KairoWolf/tor2/blob/main/SECURITY.md">security notes</a>.</p>
+
+      <div class="notice legal">
+        <p class="eyebrow">Lawful use only</p>
+        <p>tor2 is a privacy tool for legitimate private conversation. Don't
+        use it for anything illegal. You're responsible for the laws that apply
+        to you, including those governing encryption and Tor. It comes with no
+        warranty.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>tor2 is open source — you can read every line of it at
+    <a href="https://github.com/KairoWolf/tor2">github.com/KairoWolf/tor2</a>.
+    Stuck on something? Ask Kairo.</p>
+  </footer>
+
+</div>
+
+<script>
+  // ── The join code. Put the 8 digits between the quotes and republish. ──
+  var JOIN_CODE = "";
+  // Leaving it empty is fine too — then a link ending in #48213902 fills it in.
+
+  (function showCode() {
+    var raw = (JOIN_CODE || location.hash || "").replace(/[^0-9]/g, "");
+    if (raw.length !== 8) return;
+
+    var el = document.getElementById("code");
+    el.textContent = raw.slice(0, 4) + " " + raw.slice(4);
+    el.classList.remove("empty");
+
+    var joinCmd = document.getElementById("join-cmd");
+    if (joinCmd) joinCmd.textContent = "/join " + raw;
+
+    var btn = document.getElementById("copy-code");
+    btn.hidden = false;
+    btn.addEventListener("click", function () { copy(raw, btn); });
+  })();
+
+  function copy(text, btn) {
+    var done = function () {
+      var was = btn.textContent;
+      btn.textContent = "Copied";
+      btn.classList.add("done");
+      setTimeout(function () {
+        btn.textContent = was;
+        btn.classList.remove("done");
+      }, 1400);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () {});
+    } else {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); done(); } catch (e) {}
+      document.body.removeChild(ta);
+    }
+  }
+
+  // Copy buttons on the command blocks: take the text, drop the "$ " prompts.
+  Array.prototype.forEach.call(document.querySelectorAll(".cmd .copy"), function (btn) {
+    btn.addEventListener("click", function () {
+      var code = btn.parentElement.querySelector("code").cloneNode(true);
+      Array.prototype.forEach.call(code.querySelectorAll(".prompt"), function (p) {
+        p.remove();
+      });
+      copy(code.textContent.trim(), btn);
+    });
+  });
+</script>

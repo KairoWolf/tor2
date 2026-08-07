@@ -142,16 +142,28 @@ data, and the address never changes.
 ### Invite people — one 8-digit code
 
 ```sh
-tor2-server ~/.local/share/tor2-server --joincode            # one use, 24h
-tor2-server ~/.local/share/tor2-server --joincode 5 --hours 12
-tor2-server ~/.local/share/tor2-server --joincode --admin
-tor2-server ~/.local/share/tor2-server --codes               # what is live
+tor2-server --joincode                 # one use, 24h
+tor2-server --joincode 500 --hours 8760  # one code for everyone, a year
+tor2-server --joincode --admin
+tor2-server --codes                    # what is live
 ```
+
+`install-server.sh` puts that `tor2-server` command on your PATH
+(`/usr/local/bin` for a root install, `~/.local/bin` otherwise) with the data
+directory already filled in. If it is missing — an older install, or a PATH
+that does not include those — call the real thing instead, from the repo:
+`./.venv/bin/tor2-server <data-dir> --joincode`.
 
 You give them **only the digits**. They type `/join 48213902`, or enter it on
 the phone, and they are in. The number derives a temporary onion address which
 the server publishes for that code, so nothing is looked up anywhere; once the
 code is spent, that address comes down.
+
+Neither the use count nor the expiry is capped, so one code can serve a whole
+group for a year. Understand the trade: a long-lived code is a weaker secret
+than a single-use one — anyone it is forwarded to can join for as long as it
+lives, and the only way to take it back is `/joincode revoke <code>` from
+inside the app as an admin, which kills it for everybody at once.
 
 `--codes` also tells you whether a server is actually running to publish
 them — a code cannot work otherwise.
@@ -172,8 +184,8 @@ Then `/joinserver <address> <invite>`.
 ```sh
 systemctl status tor2-server                     # --user if installed as a user
 journalctl -u tor2-server -f                     # live logs
-tor2-server ~/.local/share/tor2-server --info    # address, channels, disk
-tor2-server ~/.local/share/tor2-server --backup ~/backups
+tor2-server --info    # address, channels, disk
+tor2-server --backup ~/backups
 ```
 
 **Take backups.** The archive holds the database, stored media *and the onion
@@ -324,7 +336,7 @@ in `/settings`, measured about 22% smaller than H.264 at matching quality.
 Both sides need the same version. Run `/update` (or `git pull`) and restart.
 
 **A join code does not work**
-Run `tor2-server <data-dir> --codes` on the server. A code only works once a
+Run `tor2-server --codes` on the server. A code only works once a
 running server publishes the address it derives — if the daemon is stopped or
 outdated, it says so. Fix with `systemctl restart tor2-server`.
 
@@ -347,7 +359,7 @@ ffmpeg is not installed. Text and pictures work without it.
 
 **A server command says it needs a server**
 Connect first with `/server <name>`. To mint a code while sitting on the
-server box, use `tor2-server <data-dir> --joincode` instead.
+server box, use `tor2-server --joincode` instead.
 
 ---
 
