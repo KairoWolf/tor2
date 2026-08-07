@@ -138,10 +138,10 @@ data, and the address never changes.
 ### Invite people — one 8-digit code
 
 ```sh
-tor2-server --joincode                 # one use, 24h
-tor2-server --joincode 500 --hours 8760  # one code for everyone, a year
+tor2-server --joincode                    # one use, 24h
+tor2-server --joincode 100 --hours 8760   # one code for everyone, a year
 tor2-server --joincode --admin
-tor2-server --codes                    # what is live
+tor2-server --codes                       # what is live
 ```
 
 `install-server.sh` puts that `tor2-server` command on your PATH
@@ -155,11 +155,12 @@ The number derives a temporary onion address which the server publishes for
 that code, so nothing is looked up anywhere; once the code is spent, that
 address comes down.
 
-Neither the use count nor the expiry is capped, so one code can serve a whole
-group for a year. Understand the trade: a long-lived code is a weaker secret
-than a single-use one — anyone it is forwarded to can join for as long as it
-lives, and the only way to take it back is `/joincode revoke <code>` from
-inside the app as an admin, which kills it for everybody at once.
+**Uses max out at 100** — ask for more and it is quietly clamped. The expiry is
+not capped, so one code can serve a group of up to a hundred for as long as you
+like. Understand the trade: a long-lived code is a weaker secret than a
+single-use one — anyone it is forwarded to can join for as long as it lives,
+and the only way to take it back is `/joincode revoke <code>` from inside the
+app as an admin, which kills it for everybody at once.
 
 `--codes` also tells you whether a server is actually running to publish
 them — a code cannot work otherwise.
