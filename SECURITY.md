@@ -85,11 +85,7 @@ layer. Checked while writing this:
 
 - **The server operator, in a server.** Stated above; it bears repeating.
 - **Whoever holds your device.** Contacts, saved servers, membership tokens and
-  received files sit in your home directory (or the app's private storage on
-  Android). Full-disk encryption is your job. The Android app deliberately
-  declares **no file provider**, so nothing you receive can be handed to
-  another app on the phone: pictures, video and audio are shown and played
-  inside tor2 and never reach the gallery or a media scanner.
+  received files sit in your home directory. Full-disk encryption is your job.
 - **Traffic analysis.** Tor hides addresses, not the fact that you are using
   it, nor the shape and timing of what you send. A server necessarily learns
   who talks to whom and when.
@@ -108,12 +104,10 @@ layer. Checked while writing this:
 ## What is verified, and how
 
 The wire format and its cryptography are covered by tests that run on every
-push, including reference vectors so the Android client cannot silently
-diverge from the desktop one:
+push:
 
 ```sh
-pytest tests -q                    # the Python side
-cd android && ./gradlew test       # the phone's crypto against desktop vectors
+pytest tests -q
 ```
 
 Those tests assert, among other things: that a frame encrypted with only the
